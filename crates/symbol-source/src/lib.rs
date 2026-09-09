@@ -454,7 +454,9 @@ impl SymbolSource for CodeIndexDbSource {
 
 /// Источник через HTTP к живому MCP-серверу `code-index`: рукопожатие
 /// (`initialize` + `notifications/initialized`, запоминается `Mcp-Session-Id`)
-/// один раз при создании, дальше `method_exists` зовёт `tools/call` инструмента
+/// один раз при создании — и заново, если сервер отверг сессию (см.
+/// `post_tool`: после перезапуска code-index все прежние сессии ему
+/// неизвестны). Дальше `method_exists` зовёт `tools/call` инструмента
 /// `search_function` и кэширует ответ в памяти — без кэша каждая проверка стоила
 /// бы ~13 мс (цена одного MCP-вызова), а `validate_module` проверяет сотни имён
 /// за один запрос. `owner_exports` идёт тем же путём через `get_file_summary` и
@@ -630,6 +632,59 @@ impl CodeIndexMcpSource {
         req.send_json(body)
     }
 
+    /// `tools/call` с одним повтором после протухшей сессии.
+    ///
+    /// code-index после своего перезапуска не знает прежних `Mcp-Session-Id` и
+    /// отвечает 404 «Session not found» (без заголовка сессии — 422 «expect
+    /// initialize request»). Раньше такой ответ ронял `healthy`, и первый
+    /// `validate_module` по каждому репозиторию после перезапуска code-index
+    /// уходил ослабленным — без имён конфигурации; источник поднимался только
+    /// при следующем обращении. Теперь сессия пересоздаётся здесь же и запрос
+    /// повторяется один раз. Повтор ровно один: если и новая сессия отвергнута,
+    /// это уже не перезапуск, а поломка — пусть её видит вызывающий.
+    ///
+    /// Перед этим — ещё один повтор при обрыве соединения: агент `ureq`
+    /// держит соединения в пуле, и первый же запрос после перезапуска
+    /// code-index уходит в сокет, который закрыл уже мёртвый процесс. Это не
+    /// 404, а ошибка транспорта; повтор идёт по новому соединению и только
+    /// тогда получает честный 404 про сессию (поймано на локальном smoke
+    /// 09.09.2026: без этого повтора первое имя роняло `healthy` ещё до того,
+    /// как второе успевало пересоздать сессию).
+    ///
+    /// Не для рукопожатия: `notify_initialized` ходит через `post`, иначе
+    /// отказ на нём зациклил бы переподключение.
+    fn post_tool(&self, body: Value) -> Result<ureq::Response> {
+        let first = match self.post(body.clone()) {
+            Err(ureq::Error::Transport(t)) => {
+                tracing::info!(
+                    url = %self.url,
+                    repo = %self.repo,
+                    error = %t,
+                    "code-index mcp: обрыв соединения, повторяю запрос по новому"
+                );
+                self.post(body.clone())
+            }
+            other => other,
+        };
+        match first {
+            Ok(resp) => Ok(resp),
+            Err(ureq::Error::Status(code @ (404 | 422), resp)) => {
+                let reason = resp.into_string().unwrap_or_default();
+                tracing::info!(
+                    url = %self.url,
+                    repo = %self.repo,
+                    code,
+                    reason = reason.trim(),
+                    "code-index mcp: сессия отвергнута, повторяю рукопожатие"
+                );
+                self.initialize()
+                    .context("code-index mcp: повторное рукопожатие после отвергнутой сессии")?;
+                Ok(self.post(body)?)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Находки `search_function` по имени (кэшируются). Поиск нечёткий —
     /// точность обеспечивают вызывающие, сверяя `name_lower`.
     ///
@@ -671,7 +726,7 @@ impl CodeIndexMcpSource {
             }
         });
         let resp = self
-            .post(body)
+            .post_tool(body)
             .with_context(|| format!("code-index mcp: search_function({name_lower}) не прошёл"))?;
         let text = resp.into_string().context("code-index mcp: тело ответа")?;
         let value = parse_sse_json(&text)
@@ -712,7 +767,7 @@ impl CodeIndexMcpSource {
             }
         });
         let resp = self
-            .post(body)
+            .post_tool(body)
             .with_context(|| format!("code-index mcp: read_file({xml_path}) не прошёл"))?;
         let text = resp.into_string().context("code-index mcp: тело ответа")?;
         let value = parse_sse_json(&text)
@@ -734,7 +789,7 @@ impl CodeIndexMcpSource {
             }
         });
         let resp = self
-            .post(body)
+            .post_tool(body)
             .with_context(|| format!("code-index mcp: get_file_summary({owner_path}) не прошёл"))?;
         let text = resp.into_string().context("code-index mcp: тело ответа")?;
         let value = parse_sse_json(&text)
@@ -825,7 +880,7 @@ impl CodeIndexMcpSource {
                     }
                 }
             });
-            let resp = self.post(body).with_context(|| {
+            let resp = self.post_tool(body).with_context(|| {
                 format!("code-index mcp: bsl_sql(metadata_objects, {meta_type}, offset={offset}) не прошёл")
             })?;
             let text = resp.into_string().context("code-index mcp: тело ответа")?;
@@ -867,7 +922,7 @@ impl CodeIndexMcpSource {
             }
         });
         let resp = self
-            .post(body)
+            .post_tool(body)
             .with_context(|| format!("code-index mcp: bsl_sql(attributes_json, {full_name}) не прошёл"))?;
         let text = resp.into_string().context("code-index mcp: тело ответа")?;
         let value = parse_sse_json(&text)
@@ -896,7 +951,7 @@ impl CodeIndexMcpSource {
             }
         });
         let resp = self
-            .post(body)
+            .post_tool(body)
             .with_context(|| "code-index mcp: grep_code(модули приложения) не прошёл")?;
         let text = resp.into_string().context("code-index mcp: тело ответа")?;
         let value = parse_sse_json(&text)
@@ -1456,6 +1511,186 @@ mod tests {
         let fns = found_fns_from_search(&v).expect("корректный ответ");
         assert!(!fns.iter().any(|f| f.name_lower == "сведенияовнешнейобработке"));
         assert!(fns.iter().any(|f| f.name_lower == "сведенияовнешнейобработкедопустимой"));
+    }
+
+    // ── протухшая сессия: рукопожатие заново внутри того же вызова ───────
+    //
+    // Реальный случай 09.09.2026: code-index-serve на ВМ перезапустился, а
+    // bsl-context жил дальше со старыми сессиями. Первый validate_module по
+    // каждому репозиторию получал 404 «Session not found», ронял healthy и
+    // уходил без имён конфигурации; источник поднимался только при следующем
+    // обращении. Поддельный сервер ниже ведёт себя как настоящий code-index в
+    // этой части: выдаёт сессию на initialize, отвергает чужую на tools/call.
+
+    /// Поддельный code-index. `restart()` забывает все выданные сессии —
+    /// как перезапуск сервера.
+    struct FakeCodeIndex {
+        url: String,
+        inits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        valid: std::sync::Arc<Mutex<HashSet<String>>>,
+        /// Отвергать любую сессию, даже только что выданную.
+        reject_all: std::sync::Arc<AtomicBool>,
+        /// Следующее соединение закрыть без ответа — как сокет из пула,
+        /// который закрыл перезапущенный сервер.
+        drop_next: std::sync::Arc<AtomicBool>,
+    }
+
+    impl FakeCodeIndex {
+        fn start() -> Self {
+            use std::io::{Read, Write};
+            use std::sync::atomic::AtomicUsize;
+            use std::sync::Arc;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+            let inits = Arc::new(AtomicUsize::new(0));
+            let valid: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+            let reject_all = Arc::new(AtomicBool::new(false));
+            let drop_next = Arc::new(AtomicBool::new(false));
+            let (inits_srv, valid_srv, reject_srv, drop_srv) =
+                (inits.clone(), valid.clone(), reject_all.clone(), drop_next.clone());
+
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.unwrap();
+                    if drop_srv.swap(false, Ordering::SeqCst) {
+                        drop(stream);
+                        continue;
+                    }
+                    // Запрос: заголовки до пустой строки, потом тело по Content-Length.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let header_end = loop {
+                        let n = stream.read(&mut chunk).unwrap();
+                        if n == 0 {
+                            break None;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(pos + 4);
+                        }
+                    };
+                    let Some(header_end) = header_end else { continue };
+                    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                    let content_length = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .unwrap_or(0);
+                    while buf.len() < header_end + content_length {
+                        let n = stream.read(&mut chunk).unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let session = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("mcp-session-id:").map(|v| v.trim().to_string()));
+                    let body: Value = serde_json::from_slice(&buf[header_end..]).unwrap_or(Value::Null);
+                    let method = body.get("method").and_then(|m| m.as_str()).unwrap_or_default();
+
+                    let (status, extra_header, payload) = match method {
+                        "initialize" => {
+                            let n = inits_srv.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            let sid = format!("session-{n}");
+                            valid_srv.lock().unwrap().insert(sid.clone());
+                            (
+                                "200 OK",
+                                format!("Mcp-Session-Id: {sid}\r\n"),
+                                r#"event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"0"}}}
+
+"#
+                                .to_string(),
+                            )
+                        }
+                        "notifications/initialized" => ("202 Accepted", String::new(), String::new()),
+                        _ if reject_srv.load(Ordering::SeqCst)
+                            || session.as_ref().is_none_or(|s| !valid_srv.lock().unwrap().contains(s)) => {
+                            ("404 Not Found", String::new(), "Not Found: Session not found".to_string())
+                        }
+                        "tools/call" => {
+                            let tool = body.pointer("/params/name").and_then(|t| t.as_str()).unwrap_or_default();
+                            let text = match tool {
+                                "get_stats" => r#"{"repo":"ut","db":{},"daemon":{"status":"ready"}}"#,
+                                "search_function" => r#"{"result":[{"name":"Метод","args":"() Экспорт","file_path":"base/CommonModules/М/Ext/Module.bsl"}]}"#,
+                                _ => r#"{"result":[]}"#,
+                            };
+                            let reply = serde_json::json!({
+                                "jsonrpc": "2.0", "id": body.get("id").cloned().unwrap_or(Value::Null),
+                                "result": {"content": [{"type": "text", "text": text}]}
+                            });
+                            ("200 OK", String::new(), format!("event: message\ndata: {reply}\n\n"))
+                        }
+                        _ => ("400 Bad Request", String::new(), String::new()),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\n{extra_header}Content-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+
+            Self { url, inits, valid, reject_all, drop_next }
+        }
+
+        /// Следующее соединение оборвать без ответа.
+        fn drop_next_connection(&self) {
+            self.drop_next.store(true, Ordering::SeqCst);
+        }
+
+        fn inits(&self) -> usize {
+            self.inits.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Перезапуск сервера: прежние сессии забыты.
+        fn restart(&self) {
+            self.valid.lock().unwrap().clear();
+        }
+
+        fn reject_all(&self) {
+            self.reject_all.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn stale_session_is_renewed_within_the_same_call() {
+        let fake = FakeCodeIndex::start();
+        let src = CodeIndexMcpSource::new(fake.url.clone(), "ut".to_string(), 5_000)
+            .expect("рукопожатие с поддельным code-index");
+        assert_eq!(fake.inits(), 1);
+
+        fake.restart();
+        // Как в жизни: первый запрос уходит в соединение из пула, которое
+        // закрыл старый процесс, — обрыв, и только повтор получает 404.
+        fake.drop_next_connection();
+
+        assert!(
+            src.method_exists("метод"),
+            "после перезапуска code-index имя должно найтись с ПЕРВОГО вызова, а не со второго"
+        );
+        assert!(src.is_healthy(), "протухшая сессия — не повод ронять источник");
+        assert_eq!(fake.inits(), 2, "ровно одно повторное рукопожатие");
+
+        // Сессия уже новая: следующее имя (кэшем не покрыто) идёт без рукопожатий.
+        let _ = src.method_exists("другоеимя");
+        assert_eq!(fake.inits(), 2);
+    }
+
+    #[test]
+    fn rejected_session_twice_in_a_row_is_a_failure_not_a_loop() {
+        // Повтор ровно один: если и новая сессия отвергнута, это поломка, а не
+        // перезапуск — источник падает в «нездоров», как раньше, без зацикливания.
+        let fake = FakeCodeIndex::start();
+        let src = CodeIndexMcpSource::new(fake.url.clone(), "ut".to_string(), 5_000).unwrap();
+        fake.restart();
+        fake.reject_all(); // и новые сессии тоже отвергать
+        let inits_before = fake.inits();
+
+        assert!(!src.method_exists("метод"));
+        assert!(!src.is_healthy());
+        assert_eq!(fake.inits(), inits_before + 1, "одно рукопожатие, не цикл");
     }
 
     // ── служебный ответ code-index ≠ «данных нет» ────────────────────────
