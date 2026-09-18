@@ -106,15 +106,19 @@ async fn main() -> anyhow::Result<()> {
                     global_properties = index.global_properties.len(),
                     "PlatformIndex загружен"
                 );
-                Some(
-                    mcp_server::BslContextServer::with_defaults(
-                        index,
-                        cfg.default_validation_level,
-                        cfg.default_profile,
-                    )
-                    .with_sources(source_slots)
-                    .apply_tools_whitelist(&cfg.tools.enabled),
+                let mut server = mcp_server::BslContextServer::with_defaults(
+                    index,
+                    cfg.default_validation_level,
+                    cfg.default_profile,
                 )
+                .with_sources(source_slots)
+                .apply_tools_whitelist(&cfg.tools.enabled);
+                // Путь нужен инструменту reload_config: без него перечитывать
+                // config.toml нечего, и вызов честно отвечает отказом.
+                if let Some(path) = cli.config.clone() {
+                    server = server.with_config_path(path);
+                }
+                Some(server)
             }
             None => {
                 tracing::warn!(

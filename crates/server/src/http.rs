@@ -16,7 +16,7 @@ use rmcp::transport::streamable_http_server::{
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::mcp_server::{BslContextServer, SourceSlot};
+use crate::mcp_server::{BslContextServer, SourceMapHandle};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,8 +26,10 @@ pub struct AppState {
     pub index_stats: Option<IndexStats>,
     /// Именованные источники имён конфигураций: describe() каждого читается на
     /// каждый /health, потому что `rebuild_symbol_index` подменяет источник на
-    /// ходу. Пустая карта — сервера без источников или без индекса вообще.
-    sources: Arc<std::collections::BTreeMap<String, SourceSlot>>,
+    /// ходу, а `reload_config` перечитывает config.toml и подменяет карту целиком.
+    /// Поэтому держим handle, а не снимок — иначе health показывал бы состояние на
+    /// момент старта. Пустая карта — сервера без источников или без индекса вообще.
+    sources: SourceMapHandle,
 }
 
 #[derive(Clone, Serialize)]
@@ -70,7 +72,7 @@ pub fn router(config: Config, mcp: Option<BslContextServer>) -> Router {
         types: s.index.types.len(),
         enum_types: s.index.enum_types_count(),
     });
-    let sources = mcp.as_ref().map(|s| s.sources.clone()).unwrap_or_default();
+    let sources = mcp.as_ref().map(|s| s.sources_handle()).unwrap_or_default();
 
     let state = AppState {
         config: Arc::new(config),
@@ -108,7 +110,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let now = chrono::Utc::now();
     let uptime = (now - state.started_at).num_seconds();
     let mut symbol_sources = std::collections::BTreeMap::new();
-    for (name, slot) in state.sources.iter() {
+    // Снимок карты берём и сразу отпускаем std-блокировку: ниже в цикле `await`,
+    // а std::sync-блокировка не должна переживать его.
+    let sources = state.sources.read().unwrap().clone();
+    for (name, slot) in sources.iter() {
         let status = slot
             .source
             .read()

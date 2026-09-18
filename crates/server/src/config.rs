@@ -74,7 +74,7 @@ pub struct Config {
 }
 
 /// Конфигурация внешнего источника имён (крейт `symbol-source`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SymbolSourceConfig {
     /// "none" (по умолчанию) | "lite" | "code_index_db" | "code_index_mcp"

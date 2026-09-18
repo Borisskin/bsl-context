@@ -11,6 +11,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use bsl_context_server::mcp_server::{
     BslContextServer, GetMemberParams, InfoParams, RebuildSymbolIndexParams,
@@ -315,7 +316,7 @@ async fn rebuild_symbol_index_builds_database_and_creates_directory() {
     assert!(v["modules"].as_u64().unwrap() > 0);
     assert!(db.exists(), "база не создана");
     // Источник подменён в памяти.
-    assert!(srv.sources["wms"].source.read().await.is_some());
+    assert!(srv.slot("wms").unwrap().source.read().await.is_some());
     // Временный файл убран.
     assert!(!db.with_extension("db.tmp").exists());
 
@@ -348,7 +349,7 @@ async fn validate_module_reconnects_source_on_demand() {
     cfg.root = Some(root.clone());
     cfg.db_path = Some(db.clone());
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Ok(None))]);
-    assert!(srv.sources["ut"].source.read().await.is_none());
+    assert!(srv.slot("ut").unwrap().source.read().await.is_none());
 
     let json = srv
         .validate_module(Parameters(ValidateModuleParams {
@@ -366,7 +367,7 @@ async fn validate_module_reconnects_source_on_demand() {
         "ожидалась валидация, а не отказ: {json}"
     );
     assert!(
-        srv.sources["ut"].source.read().await.is_some(),
+        srv.slot("ut").unwrap().source.read().await.is_some(),
         "источник должен быть поднят на лету"
     );
     // Имя из глобального общего модуля источник знает — ложной находки нет.
@@ -641,6 +642,170 @@ async fn validate_module_rejects_repo_when_no_sources_configured() {
             .as_str()
             .unwrap()
             .contains("не настроено ни одной конфигурации"),
+        "сообщение: {json}"
+    );
+}
+
+// ── Горячая перечитка config.toml (`reload_config`) ────────────────────────
+//
+// Сервер собирается клоном от `make_server()`: загрузка hbk — десятки секунд, а
+// второй раз она тесту не нужна.
+
+/// Записать config.toml во временный каталог и вернуть путь к нему.
+///
+/// `entries` — пары (алиас, db_path). Секции объявлены как `kind = "lite"` с
+/// заведомо несуществующей базой: источник штатно остаётся «не собранным», и
+/// наружу ни один запрос не уходит.
+fn write_config(dir: &std::path::Path, entries: &[(&str, &str)]) -> PathBuf {
+    let mut text = String::new();
+    for (repo, db_path) in entries {
+        // Литеральные строки TOML: в пути на Windows обратные слэши, и обычная
+        // строка разбиралась бы как escape-последовательности.
+        text.push_str(&format!(
+            "[[symbol_sources]]\nrepo = \"{repo}\"\nkind = \"lite\"\ndb_path = '{db_path}'\n\n"
+        ));
+    }
+    let path = dir.join("config.toml");
+    std::fs::write(&path, text).expect("запись config.toml");
+    path
+}
+
+fn string_array(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("поле {key} должно быть массивом: {v}"))
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Секция, дописанная в config.toml после старта, появляется в карте после перечитки.
+#[tokio::test]
+async fn reload_config_adds_section_written_after_start() {
+    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let dir = tempfile::TempDir::new().unwrap();
+    write_config(dir.path(), &[("ut", "C:/no/such/ut_lite.db")]);
+    let srv = srv.with_config_path(dir.path().join("config.toml"));
+    assert!(srv.slot("ut").is_none(), "слоты строит перечитка");
+
+    // Первая перечитка — начальная карта из файла.
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    assert_eq!(string_array(&v, "added"), vec!["ut".to_string()], "ответ: {json}");
+    assert!(srv.slot("ut").is_some());
+
+    // Секцию дописали уже на работающем сервере.
+    write_config(
+        dir.path(),
+        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+    );
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    assert_eq!(string_array(&v, "added"), vec!["bp".to_string()], "ответ: {json}");
+    assert!(srv.slot("bp").is_some(), "алиас должен быть в карте: {json}");
+    assert!(srv.slot("ut").is_some());
+}
+
+/// Неизменившийся слот остаётся тем же объектом (иначе у подключённого источника
+/// погас бы кэш и разорвалась сессия к code-index), изменённый — пересоздаётся.
+#[tokio::test]
+async fn reload_config_keeps_unchanged_slot_and_recreates_changed() {
+    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let dir = tempfile::TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+    );
+    let srv = srv.with_config_path(dir.path().join("config.toml"));
+
+    // Первая перечитка — начальная карта.
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    let ut_before = srv.slot("ut").unwrap();
+    let bp_before = srv.slot("bp").unwrap();
+
+    // «bp» правим, «ut» оставляем как был.
+    write_config(
+        dir.path(),
+        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite_v2.db")],
+    );
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    assert_eq!(string_array(&v, "unchanged"), vec!["ut".to_string()], "ответ: {json}");
+    assert_eq!(string_array(&v, "recreated"), vec!["bp".to_string()], "ответ: {json}");
+    assert!(
+        Arc::ptr_eq(&ut_before, &srv.slot("ut").unwrap()),
+        "неизменившийся слот должен остаться тем же объектом"
+    );
+    assert!(
+        !Arc::ptr_eq(&bp_before, &srv.slot("bp").unwrap()),
+        "изменённый слот должен быть пересоздан"
+    );
+}
+
+/// Удалённая из файла секция уходит из карты.
+#[tokio::test]
+async fn reload_config_removes_deleted_section() {
+    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let dir = tempfile::TempDir::new().unwrap();
+    write_config(
+        dir.path(),
+        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+    );
+    let srv = srv.with_config_path(dir.path().join("config.toml"));
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    assert!(srv.slot("ut").is_some());
+
+    write_config(dir.path(), &[("bp", "C:/no/such/bp_lite.db")]);
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    assert_eq!(string_array(&v, "removed"), vec!["ut".to_string()], "ответ: {json}");
+    assert!(srv.slot("ut").is_none(), "удалённый алиас должен уйти из карты: {json}");
+    assert!(srv.slot("bp").is_some());
+}
+
+/// Алиас, дописанный в файл после старта, подхватывается и `reconnect_symbol_source`:
+/// переподключать нечего, если алиаса нет в карте, — поэтому вызов сначала перечитывает
+/// config.toml.
+#[tokio::test]
+async fn reconnect_symbol_source_picks_up_section_written_after_start() {
+    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let dir = tempfile::TempDir::new().unwrap();
+    write_config(dir.path(), &[("ut", "C:/no/such/ut_lite.db")]);
+    let srv = srv.with_config_path(dir.path().join("config.toml"));
+    assert!(srv.slot("bp").is_none());
+
+    write_config(
+        dir.path(),
+        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+    );
+    let json = srv
+        .reconnect_symbol_source(Parameters(ReconnectSymbolSourceParams {
+            repo: Some("bp".to_string()),
+        }))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true, "ответ: {json}");
+    assert_eq!(v["repo"], "bp");
+}
+
+/// Сервер запущен без `--config` — перечитывать нечего, и это должно быть сказано
+/// внятно, а не паникой.
+#[tokio::test]
+async fn reload_config_without_config_path_reports_refusal() {
+    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let json = srv.reload_config().await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], false, "ответ: {json}");
+    assert!(
+        v["message"].as_str().unwrap().contains("без --config"),
         "сообщение: {json}"
     );
 }

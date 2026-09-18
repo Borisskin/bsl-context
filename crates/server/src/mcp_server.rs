@@ -8,7 +8,7 @@
 //! `validateMethodCall`. Phase 6 — `validateExpression`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -44,6 +44,16 @@ pub struct SourceSlot {
     /// только чтением журнала сервера.
     last_error: std::sync::Mutex<Option<String>>,
 }
+
+/// Карта слотов источников имён: алиас → слот.
+///
+/// Подменяется целиком при перечитке config.toml (`reload_config`), поэтому слоты
+/// живут за `Arc`: запрос, начатый до подмены, доработает со старым слотом.
+pub type SourceMap = BTreeMap<String, Arc<SourceSlot>>;
+
+/// Карта слотов за блокировкой чтения/записи. Вынесена наружу (`http.rs`), чтобы
+/// /health читал актуальную карту, а не её снимок на момент старта.
+pub type SourceMapHandle = Arc<std::sync::RwLock<Arc<SourceMap>>>;
 
 /// Отступ между попытками переподключения. Секунды, а не мгновенно: источник
 /// поднимается людьми (перезапуск code-index) или планировщиком, и долбить его
@@ -102,7 +112,17 @@ pub struct BslContextServer {
     /// Именованные источники имён конфигураций. Ключ — алиас: это значение параметра
     /// `repo` у `validate_module`/`rebuild_symbol_index`. Пустая карта — конфигураций
     /// не настроено, валидация идёт только против справки платформы.
-    pub sources: Arc<BTreeMap<String, SourceSlot>>,
+    ///
+    /// Карта подменяется целиком при перечитке config.toml: слоты живут за `Arc`,
+    /// поэтому начатый запрос доработает со старым слотом, а не увидит полупустую карту.
+    sources: SourceMapHandle,
+    /// Путь к config.toml, если сервер запущен с `--config`. Без него перечитывать
+    /// нечего: инструмент `reload_config` отвечает отказом.
+    config_path: Option<Arc<PathBuf>>,
+    /// Снимок «холодных» полей конфига (платформа, порт, белый список, дефолты
+    /// проверки), снятый при старте и заменяемый свежим при каждой удачной перечитке.
+    /// Нужен, чтобы предупредить об их изменении один раз, а не на каждую перечитку.
+    cold_baseline: Arc<std::sync::Mutex<Option<crate::config::Config>>>,
     /// Белый список инструментов из `[tools].enabled`. `None` — фильтр выключен.
     /// `Arc`, потому что сервер клонируется на каждый запрос.
     allowed_tools: Option<Arc<BTreeSet<String>>>,
@@ -130,15 +150,18 @@ impl BslContextServer {
             engine: Arc::new(engine),
             default_validation_level: default_validation_level.clamp(1, 3),
             default_profile,
-            sources: Arc::new(BTreeMap::new()),
+            sources: Arc::new(std::sync::RwLock::new(Arc::new(BTreeMap::new()))),
+            config_path: None,
+            cold_baseline: Arc::new(std::sync::Mutex::new(None)),
             allowed_tools: None,
             tool_router: Self::tool_router(),
         }
     }
 
     /// Подключить именованные источники имён (по одному на конфигурацию). Вызывается
-    /// один раз на старте: карта дальше не меняется, меняется только содержимое слотов
-    /// (пересборка индекса конкретной конфигурации).
+    /// на старте; дальше карту целиком подменяет перечитка config.toml
+    /// (`reload_sources_from_config`), а содержимое слотов меняется пересборкой
+    /// индекса конкретной конфигурации.
     pub fn with_sources(
         mut self,
         slots: Vec<(
@@ -147,12 +170,162 @@ impl BslContextServer {
             Result<Option<Arc<dyn SymbolSource>>, String>,
         )>,
     ) -> Self {
-        let map = slots
+        let map: SourceMap = slots
             .into_iter()
-            .map(|(name, config, built)| (name, SourceSlot::new(config, built)))
+            .map(|(name, config, built)| (name, Arc::new(SourceSlot::new(config, built))))
             .collect();
-        self.sources = Arc::new(map);
+        self.sources = Arc::new(std::sync::RwLock::new(Arc::new(map)));
         self
+    }
+
+    /// Снимок карты источников. Блокировка берётся на время клонирования `Arc` и
+    /// отпускается до любого `await` — это единственное место, где берётся `read()`.
+    pub fn sources_snapshot(&self) -> Arc<SourceMap> {
+        self.sources.read().unwrap().clone()
+    }
+
+    /// Слот по алиасу — через снимок карты.
+    pub fn slot(&self, repo: &str) -> Option<Arc<SourceSlot>> {
+        self.sources_snapshot().get(repo).cloned()
+    }
+
+    /// Handle карты — для `http.rs`: /health читает карту на каждый запрос, а
+    /// перечитка подменяет её целиком, поэтому держать надо handle, а не снимок.
+    pub fn sources_handle(&self) -> SourceMapHandle {
+        self.sources.clone()
+    }
+
+    /// Подменить карту целиком. Блокировка на запись живёт без `await`: у уже
+    /// начатых запросов на руках остаётся снимок старой карты.
+    fn replace_sources(&self, map: SourceMap) {
+        *self.sources.write().unwrap() = Arc::new(map);
+    }
+
+    /// Запомнить путь к config.toml и снять базовый снимок «холодных» полей.
+    ///
+    /// Ошибка чтения старт не ломает: сервер уже поднят с тем конфигом, что прочитал
+    /// `main`, — ронять его из-за недоступного файла незачем.
+    pub fn with_config_path(mut self, path: PathBuf) -> Self {
+        match crate::config::Config::load_or_default(Some(&path)) {
+            Ok(cfg) => *self.cold_baseline.lock().unwrap() = Some(cfg),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "config.toml не прочитан — перечитка сообщит об ошибке"
+                );
+            }
+        }
+        self.config_path = Some(Arc::new(path));
+        self
+    }
+
+    /// Предупредить об изменении полей, которые перечитка не применяет: платформа,
+    /// адрес, порт и белый список инструментов прочитаны на старте, дефолты проверки
+    /// зашиты в сервер. Снимок после сравнения заменяется свежим, иначе одно и то же
+    /// предупреждение повторялось бы на каждой перечитке.
+    fn warn_on_cold_changes(&self, fresh: &crate::config::Config) {
+        let prev = {
+            let mut guard = self.cold_baseline.lock().unwrap();
+            guard.replace(fresh.clone())
+        };
+        let Some(prev) = prev else { return };
+        let changed = [
+            ("platform_path", prev.platform_path != fresh.platform_path),
+            ("host", prev.host != fresh.host),
+            ("port", prev.port != fresh.port),
+            ("allowed_hosts", prev.allowed_hosts != fresh.allowed_hosts),
+            ("tools.enabled", prev.tools.enabled != fresh.tools.enabled),
+            (
+                "default_validation_level",
+                prev.default_validation_level != fresh.default_validation_level,
+            ),
+            ("default_profile", prev.default_profile != fresh.default_profile),
+        ];
+        for (name, is_changed) in changed {
+            if is_changed {
+                tracing::warn!("поле {name} изменилось, применится после перезапуска");
+            }
+        }
+    }
+
+    /// Перечитать config.toml и подменить карту источников имён целиком.
+    ///
+    /// Применяется только список `[[symbol_sources]]`: `platform_path`, `host`,
+    /// `port`, `allowed_hosts`, `[tools].enabled` и дефолты проверки требуют
+    /// перезапуска — об их изменении пишется предупреждение в журнал.
+    ///
+    /// Слот, настройки которого не изменились, переносится в новую карту тем же
+    /// `Arc`: пересоздание погасило бы кэш и разорвало сессию к code-index у уже
+    /// подключённого источника. Идущая в этот момент пересборка чужого слота ничего
+    /// не ломает: она держит свой `Arc` и просто не попадёт в новую карту, если
+    /// алиас изменился.
+    pub async fn reload_sources_from_config(&self) -> Result<serde_json::Value, String> {
+        let Some(path) = self.config_path.as_deref() else {
+            return Err("сервер запущен без --config: перечитывать нечего".to_string());
+        };
+        // Ошибку разбора отдаём вызывающему: карту в этом случае не трогаем вовсе,
+        // чтобы опечатка в файле не оставила сервер без рабочих источников.
+        let cfg = crate::config::Config::load_or_default(Some(path))
+            .map_err(|e| format!("{e:#}"))?;
+        self.warn_on_cold_changes(&cfg);
+        let resolved = cfg.resolved_symbol_sources().map_err(|e| format!("{e:#}"))?;
+
+        let old = self.sources_snapshot();
+        let mut new_map: SourceMap = BTreeMap::new();
+        let mut added = Vec::new();
+        let mut recreated = Vec::new();
+        let mut unchanged = Vec::new();
+        for (name, new_cfg) in resolved {
+            match old.get(&name) {
+                // Настройки те же — берём тот же слот, ничего не переподключаем.
+                Some(slot) if slot.config == new_cfg => {
+                    new_map.insert(name.clone(), Arc::clone(slot));
+                    unchanged.push(name);
+                }
+                Some(_) => {
+                    new_map.insert(name.clone(), Arc::new(build_slot(new_cfg).await));
+                    recreated.push(name);
+                }
+                None => {
+                    new_map.insert(name.clone(), Arc::new(build_slot(new_cfg).await));
+                    added.push(name);
+                }
+            }
+        }
+        let removed: Vec<String> = old
+            .keys()
+            .filter(|name| !new_map.contains_key(*name))
+            .cloned()
+            .collect();
+        self.replace_sources(new_map);
+
+        // Состояние отдаём по свежей карте: подключение новых слотов только что
+        // прошло, и потребителю нужен результат, а не то, что было до перечитки.
+        let sources = {
+            let map = self.sources_snapshot();
+            let mut out = Vec::with_capacity(map.len());
+            for (name, slot) in map.iter() {
+                out.push(slot_state_json(name, slot).await);
+            }
+            out
+        };
+        tracing::info!(
+            added = ?added,
+            removed = ?removed,
+            recreated = ?recreated,
+            unchanged = ?unchanged,
+            "config.toml перечитан — карта источников имён подменена"
+        );
+        Ok(serde_json::json!({
+            "ok": true,
+            "config_path": path.display().to_string(),
+            "added": added,
+            "removed": removed,
+            "recreated": recreated,
+            "unchanged": unchanged,
+            "sources": sources,
+        }))
     }
 
     /// Применить белый список инструментов (`[tools].enabled` из config.toml).
@@ -219,13 +392,18 @@ impl BslContextServer {
 
     /// Настроенные алиасы через запятую — для текста ошибок.
     fn source_names(&self) -> String {
-        self.sources.keys().cloned().collect::<Vec<_>>().join(", ")
+        self.sources_snapshot()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Найти конфигурацию по алиасу. `repo` обязателен, когда настроена хотя бы одна:
     /// молча подставлять единственную нельзя — вызов должен быть однозначным.
-    fn resolve_slot(&self, repo: Option<&str>) -> Result<&SourceSlot, String> {
-        if self.sources.is_empty() {
+    fn resolve_slot(&self, repo: Option<&str>) -> Result<Arc<SourceSlot>, String> {
+        let sources = self.sources_snapshot();
+        if sources.is_empty() {
             return Err(
                 "на сервере не настроено ни одной конфигурации: ни выгрузки, ни источника имён \
                  (секция [[symbol_sources]] в config.toml)"
@@ -233,7 +411,7 @@ impl BslContextServer {
             );
         }
         match repo {
-            Some(name) => self.sources.get(name).ok_or_else(|| {
+            Some(name) => sources.get(name).cloned().ok_or_else(|| {
                 format!(
                     "конфигурация \"{name}\" не настроена; доступны: {}",
                     self.source_names()
@@ -370,6 +548,46 @@ impl BslContextServer {
         })
         .to_string())
     }
+}
+
+/// Создать слот источника: подключение синхронное (рукопожатие MCP через `ureq`),
+/// поэтому идёт в `spawn_blocking` — worker-поток tokio им занимать нельзя.
+async fn build_slot(config: crate::config::SymbolSourceConfig) -> SourceSlot {
+    let cfg = config.clone();
+    let built = tokio::task::spawn_blocking(move || crate::sources::build_symbol_source(&cfg))
+        .await
+        .unwrap_or_else(|e| Err(format!("поток подключения источника упал: {e}")));
+    SourceSlot::new(config, built)
+}
+
+/// Состояние слота в виде JSON.
+///
+/// Собрано в одном месте, потому что поля читают три потребителя:
+/// `symbol_sources_status`, `reconnect_symbol_source` и отчёт перечитки
+/// (`reload_sources_from_config`). Разъехавшись, они бы расходились молча.
+async fn slot_state_json(repo: &str, slot: &SourceSlot) -> serde_json::Value {
+    let guard = slot.source.read().await;
+    let (connected, healthy, describe) = match guard.as_ref() {
+        Some(source) => (true, source.is_healthy(), Some(source.describe())),
+        None => (false, false, None),
+    };
+    let state = match (connected, healthy) {
+        (true, true) => "ok",
+        (true, false) => "unhealthy",
+        _ => "not_connected",
+    };
+    serde_json::json!({
+        "repo": repo,
+        "kind": slot.config.kind,
+        "connected": connected,
+        "healthy": healthy,
+        "state": state,
+        // Для нездорового источника причина — в его собственном описании
+        // (что именно ответил code-index), для неподнятого — в слоте.
+        "last_error": describe
+            .filter(|_| !healthy)
+            .or_else(|| slot.last_error()),
+    })
 }
 
 /// Отказ инструмента: не паника и не пустой ответ, а внятная причина.
@@ -703,7 +921,7 @@ impl BslContextServer {
         // против справки платформы, как до появления параметра repo. Остальные случаи
         // (сервер пуст, но repo передан; сервер настроен) идут через resolve_slot — он
         // же формирует и единообразный текст ошибки для этого и для rebuild_symbol_index.
-        let slot = if self.sources.is_empty() && p.repo.is_none() {
+        let slot = if self.sources_snapshot().is_empty() && p.repo.is_none() {
             None
         } else {
             match self.resolve_slot(p.repo.as_deref()) {
@@ -740,7 +958,7 @@ impl BslContextServer {
             }
         };
         if stale {
-            self.try_reconnect(repo, slot, false).await;
+            self.try_reconnect(repo, &slot, false).await;
         }
         let guard = slot.source.read().await;
         let source = match guard.as_ref() {
@@ -915,30 +1133,10 @@ impl BslContextServer {
                        state — 'ok' | 'not_connected' | 'unhealthy'."
     )]
     pub async fn symbol_sources_status(&self) -> String {
-        let mut out = Vec::with_capacity(self.sources.len());
-        for (repo, slot) in self.sources.iter() {
-            let guard = slot.source.read().await;
-            let (connected, healthy, describe) = match guard.as_ref() {
-                Some(source) => (true, source.is_healthy(), Some(source.describe())),
-                None => (false, false, None),
-            };
-            let state = match (connected, healthy) {
-                (true, true) => "ok",
-                (true, false) => "unhealthy",
-                _ => "not_connected",
-            };
-            out.push(serde_json::json!({
-                "repo": repo,
-                "kind": slot.config.kind,
-                "connected": connected,
-                "healthy": healthy,
-                "state": state,
-                // Для нездорового источника причина — в его собственном описании
-                // (что именно ответил code-index), для неподнятого — в слоте.
-                "last_error": describe
-                    .filter(|_| !healthy)
-                    .or_else(|| slot.last_error()),
-            }));
+        let sources = self.sources_snapshot();
+        let mut out = Vec::with_capacity(sources.len());
+        for (repo, slot) in sources.iter() {
+            out.push(slot_state_json(repo, slot).await);
         }
         serde_json::json!({"ok": true, "sources": out}).to_string()
     }
@@ -965,36 +1163,72 @@ impl BslContextServer {
                 ))
             }
         };
-        let slot = match self.resolve_slot(Some(repo)) {
-            Ok(slot) => slot,
-            Err(msg) => return err_json(&msg),
+        // Алиаса может не быть в карте просто потому, что секцию дописали в
+        // config.toml уже после старта: тогда перечитываем файл и ищем ещё раз.
+        let slot = match self.slot(repo) {
+            Some(slot) => Some(slot),
+            None if self.config_path.is_some() => {
+                if let Err(msg) = self.reload_sources_from_config().await {
+                    return err_json(&msg);
+                }
+                self.slot(repo)
+            }
+            None => None,
+        };
+        let slot = match slot {
+            Some(slot) => slot,
+            None => {
+                // Текст отказа — прежний, из resolve_slot, плюс признак того, что
+                // файл уже перечитан: без него «не настроена» читается как «в
+                // config.toml её нет» без проверки, а проверить как раз и просили.
+                let msg = self
+                    .resolve_slot(Some(repo))
+                    .err()
+                    .unwrap_or_else(|| format!("конфигурация \"{repo}\" не настроена"));
+                let msg = if self.config_path.is_some() {
+                    format!("{msg}. config.toml перечитан; секции с repo \"{repo}\" в нём нет")
+                } else {
+                    msg
+                };
+                return err_json(&msg);
+            }
         };
         // force: попросили явно — отступ между автоматическими попытками здесь
         // ни при чём, иначе вызов «подними сейчас» молча ничего бы не делал.
-        self.try_reconnect(repo, slot, true).await;
+        self.try_reconnect(repo, &slot, true).await;
 
-        let guard = slot.source.read().await;
-        let (connected, healthy, describe) = match guard.as_ref() {
-            Some(source) => (true, source.is_healthy(), Some(source.describe())),
-            None => (false, false, None),
-        };
-        let state = match (connected, healthy) {
-            (true, true) => "ok",
-            (true, false) => "unhealthy",
-            _ => "not_connected",
-        };
-        serde_json::json!({
-            "ok": true,
-            "repo": repo,
-            "kind": slot.config.kind,
-            "connected": connected,
-            "healthy": healthy,
-            "state": state,
-            "last_error": describe
-                .filter(|_| !healthy)
-                .or_else(|| slot.last_error()),
-        })
-        .to_string()
+        // Ответ инструмента — состояние слота плюс собственный флаг `ok`.
+        let state = slot_state_json(repo, &slot).await;
+        let mut out = serde_json::Map::new();
+        out.insert("ok".to_string(), serde_json::Value::Bool(true));
+        if let serde_json::Value::Object(fields) = state {
+            out.extend(fields);
+        }
+        serde_json::Value::Object(out).to_string()
+    }
+
+    #[tool(
+        description = "Перечитать config.toml без перезапуска сервера: применяется список источников \
+                       имён конфигураций ([[symbol_sources]]). Нужен, когда секцию источника \
+                       дописали или поправили в файле уже после старта и перезапускать сервис \
+                       ради этого не хочется: у неизменившегося источника настройки те же, и он \
+                       остаётся тем же объектом (кэш и открытая сессия к code-index не теряются), \
+                       изменённый или новый подключается заново, а удалённый уходит из карты. \
+                       Применяется ТОЛЬКО список источников: platform_path, host, port, \
+                       allowed_hosts, [tools].enabled и дефолты проверки прочитаны при старте — \
+                       об их изменении пишется предупреждение в журнал, но в силу они вступают \
+                       после перезапуска. Параметров нет. Возвращает JSON \
+                       {ok, config_path, added:[…], removed:[…], recreated:[…], unchanged:[…], \
+                       sources:[{repo, kind, connected, healthy, state, last_error}]}, где state — \
+                       'ok' | 'not_connected' | 'unhealthy'; ok: false — сервер запущен без \
+                       --config либо файл не читается или не разбирается (карта при этом не \
+                       меняется)."
+    )]
+    pub async fn reload_config(&self) -> String {
+        match self.reload_sources_from_config().await {
+            Ok(json) => json.to_string(),
+            Err(msg) => err_json(&msg),
+        }
     }
 
     #[tool(
@@ -1034,7 +1268,7 @@ impl BslContextServer {
         if slot.rebuilding.swap(true, Ordering::SeqCst) {
             return err_json("пересборка уже идёт");
         }
-        let result = self.rebuild_inner(slot, &root, &db_path).await;
+        let result = self.rebuild_inner(&slot, &root, &db_path).await;
         slot.rebuilding.store(false, Ordering::SeqCst);
         match result {
             Ok(json) => json,

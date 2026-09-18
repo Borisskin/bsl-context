@@ -334,6 +334,18 @@ procedure call. Hence:
   reconnected on the next call, at most once per 15 seconds. `symbol_sources_status` shows
   the state of every configured source, and `reconnect_symbol_source` retries immediately.
 
+The list of sources is read from `config.toml` at startup, but a `[[symbol_sources]]`
+section can be added or edited on a running server too: `reload_config` re-reads the file
+and swaps the whole source map, without a restart. A slot whose settings did not change
+stays **the very same object** — its cache and its open `code-index` session survive; a
+changed source is connected afresh; a section removed from the file leaves the map. If
+`reconnect_symbol_source` is called with an alias missing from the map, it re-reads the
+file first, so a section written after startup is picked up by that single call. **Only**
+the source list applies: `platform_path`, `host`, `port`, `allowed_hosts`,
+`[tools].enabled` and the validation defaults are read at startup — a change to them
+produces a warning in the log and takes effect after a restart. When the server runs
+without `--config` there is nothing to re-read, and `reload_config` says exactly that.
+
 ### Tool whitelist
 
 If you only need part of the server's surface, list the tools you want in the
@@ -344,7 +356,7 @@ If you only need part of the server's surface, list the tools you want in the
 enabled = ["validate_module", "get_constructors", "get_enum_values"]
 ```
 
-A missing section or an empty list means all thirteen tools are available, as before.
+A missing section or an empty list means all fourteen tools are available, as before.
 Hidden tools are absent from `tools/list` and are rejected on a direct call.
 An unknown name does not break startup: it produces a warning in the log and the
 tool simply never appears.
@@ -375,6 +387,7 @@ Transport — Streamable HTTP at `http://127.0.0.1:8007/mcp` (stateless).
 | `rebuild_symbol_index` | Rebuild the own name index (`kind = "lite"`); paths come from the config |
 | `symbol_sources_status` | State of every configured name source: connected, healthy, last connection error |
 | `reconnect_symbol_source` | Retry the connection to one source without restarting the server |
+| `reload_config` | Re-read `config.toml` and swap the symbol source map without restarting the server. Only `[[symbol_sources]]` applies: platform, port and the tool whitelist take effect after a restart |
 | `reserved_names` | Context-occupied names from the platform help: `global_readonly`/`form_readonly` (assignment fails at runtime), `global_writable`/`form_writable` (no variable is created — the session or the form is silently changed) |
 
 ## Connecting an MCP client
