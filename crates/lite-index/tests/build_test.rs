@@ -68,7 +68,11 @@ fn build_indexes_all_modules_and_flags() {
     let db_path = tmp.path().join("lite.db");
     let stats = build(tmp.path(), &db_path, 0).unwrap();
 
-    assert_eq!(stats.modules, 4, "ожидались 4 модуля, получили {}", stats.modules);
+    assert_eq!(
+        stats.modules, 4,
+        "ожидались 4 модуля, получили {}",
+        stats.modules
+    );
     assert_eq!(stats.global_modules, 1);
     assert!(stats.methods >= 4);
 
@@ -126,7 +130,9 @@ fn build_indexes_all_modules_and_flags() {
         .all_objects()
         .unwrap()
         .expect("свежесобранная база должна содержать таблицу objects");
-    let enums = objects.get("Enums").expect("коллекция Enums должна быть в наборе");
+    let enums = objects
+        .get("Enums")
+        .expect("коллекция Enums должна быть в наборе");
     assert!(
         enums.contains("ТестБезМодуля"),
         "объект без модуля не попал в objects, получено: {:?}",

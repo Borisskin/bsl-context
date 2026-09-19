@@ -408,9 +408,7 @@ pub fn validate_expression_with_profile(
     let mut result = validate_expression_at_level(index, source, effective_level);
 
     if profile == Profile::Strict {
-        result
-            .errors
-            .retain(|e| e.confidence == Confidence::High);
+        result.errors.retain(|e| e.confidence == Confidence::High);
         result.valid = result.errors.is_empty();
     }
 
@@ -462,10 +460,9 @@ pub(crate) fn check_type_dot_members(
             }
             // Проверяем что member — одно из enum_values (ru/en).
             let m_lower = member.to_lowercase();
-            let exists = ty
-                .enum_values
-                .iter()
-                .any(|v| v.name_ru.to_lowercase() == m_lower || v.name_en.to_lowercase() == m_lower);
+            let exists = ty.enum_values.iter().any(|v| {
+                v.name_ru.to_lowercase() == m_lower || v.name_en.to_lowercase() == m_lower
+            });
             if !exists {
                 let (line, col) = pos_at(src, dot.member_byte);
                 let allowed: Vec<String> =
@@ -500,14 +497,12 @@ pub(crate) fn check_type_dot_members(
             continue;
         } else {
             let m_lower = member.to_lowercase();
-            let exists_method = ty
-                .methods
-                .iter()
-                .any(|m| m.name_ru.to_lowercase() == m_lower || m.name_en.to_lowercase() == m_lower);
-            let exists_prop = ty
-                .properties
-                .iter()
-                .any(|p| p.name_ru.to_lowercase() == m_lower || p.name_en.to_lowercase() == m_lower);
+            let exists_method = ty.methods.iter().any(|m| {
+                m.name_ru.to_lowercase() == m_lower || m.name_en.to_lowercase() == m_lower
+            });
+            let exists_prop = ty.properties.iter().any(|p| {
+                p.name_ru.to_lowercase() == m_lower || p.name_en.to_lowercase() == m_lower
+            });
             if !exists_method && !exists_prop {
                 let (line, col) = pos_at(src, dot.member_byte);
                 let mut allowed: Vec<String> =
@@ -971,14 +966,28 @@ mod tests {
                 name: "Основная".into(),
                 description: String::new(),
                 parameters: vec![
-                    Parameter { name: "ИсходнаяСтрока".into(), type_name: String::new(), required: true, description: String::new() },
-                    Parameter { name: "КодЯзыка".into(), type_name: String::new(), required: false, description: String::new() },
+                    Parameter {
+                        name: "ИсходнаяСтрока".into(),
+                        type_name: String::new(),
+                        required: true,
+                        description: String::new(),
+                    },
+                    Parameter {
+                        name: "КодЯзыка".into(),
+                        type_name: String::new(),
+                        required: false,
+                        description: String::new(),
+                    },
                 ],
             }],
         });
         let src = "Текст = НСтр(\"ru = 'Неверный тип запроса.'\");";
         let res = validate_expression_at_level(&index, src, 1);
-        assert!(res.valid, "НСтр с одним строковым аргументом ложно помечен: {:?}", res.errors);
+        assert!(
+            res.valid,
+            "НСтр с одним строковым аргументом ложно помечен: {:?}",
+            res.errors
+        );
     }
 
     // ── fuzzy_confidence_for: дефект хотфикса 0.5.1 ─────────────────────────
@@ -1042,12 +1051,18 @@ mod tests {
 
     #[test]
     fn confidence_mapping() {
-        assert_eq!(ExprErrorKind::UnknownEnumValue.confidence(), Confidence::High);
+        assert_eq!(
+            ExprErrorKind::UnknownEnumValue.confidence(),
+            Confidence::High
+        );
         assert_eq!(
             ExprErrorKind::WrongArgumentCount.confidence(),
             Confidence::High
         );
-        assert_eq!(ExprErrorKind::UnknownTypeMember.confidence(), Confidence::Low);
+        assert_eq!(
+            ExprErrorKind::UnknownTypeMember.confidence(),
+            Confidence::Low
+        );
         assert_eq!(ExprErrorKind::UnknownNewType.confidence(), Confidence::Low);
         assert_eq!(
             ExprErrorKind::UnknownGlobalMethod.confidence(),
@@ -1058,7 +1073,10 @@ mod tests {
     #[test]
     fn profile_parse_or_default() {
         assert_eq!(Profile::parse_or_default(Some("strict")), Profile::Strict);
-        assert_eq!(Profile::parse_or_default(Some("  STRICT ")), Profile::Strict);
+        assert_eq!(
+            Profile::parse_or_default(Some("  STRICT ")),
+            Profile::Strict
+        );
         assert_eq!(Profile::parse_or_default(Some("full")), Profile::Full);
         assert_eq!(Profile::parse_or_default(Some("чтотоиное")), Profile::Full);
         assert_eq!(Profile::parse_or_default(None), Profile::Full);
@@ -1136,7 +1154,11 @@ mod tests {
         // Значение из конфигурации: в справке его нет, но тип открытый.
         let src = "А = КартинкиТест.МояКартинка;";
         let result = validate_expression_with_profile(&index, src, 1, Profile::Full);
-        assert!(result.valid, "открытая коллекция не даёт находок: {:?}", result.errors);
+        assert!(
+            result.valid,
+            "открытая коллекция не даёт находок: {:?}",
+            result.errors
+        );
     }
 
     #[test]
@@ -1148,16 +1170,20 @@ mod tests {
 
         assert!(!result.valid);
         assert_eq!(result.errors.len(), 2, "full должен вернуть обе находки");
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.kind == ExprErrorKind::UnknownEnumValue
-                && e.confidence == Confidence::High));
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.kind == ExprErrorKind::UnknownTypeMember
-                && e.confidence == Confidence::Low));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::UnknownEnumValue
+                    && e.confidence == Confidence::High)
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::UnknownTypeMember
+                    && e.confidence == Confidence::Low)
+        );
     }
 
     #[test]

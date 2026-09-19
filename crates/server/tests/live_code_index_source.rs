@@ -53,7 +53,8 @@ fn source() -> Option<CodeIndexMcpSource> {
 fn common_modules_set_is_complete_not_first_page() {
     let Some(src) = source() else { return };
 
-    for name in ["общегоназначения", "закупки", "управлениедоступом"] {
+    for name in ["общегоназначения", "закупки", "управлениедоступом"]
+    {
         assert_eq!(
             src.object_exists("CommonModules", name),
             Some(true),

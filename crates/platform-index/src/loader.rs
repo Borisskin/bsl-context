@@ -27,8 +27,7 @@ pub fn load_from_hbk(path: &Path) -> Result<PlatformIndex> {
     info!(?path, "загрузка платформенного контекста из hbk");
     let mut content = HbkContent::read(path)
         .map_err(|e| anyhow!("не удалось открыть hbk {}: {}", path.display(), e))?;
-    build_index(&mut content)
-        .with_context(|| format!("сборка PlatformIndex из {}", path.display()))
+    build_index(&mut content).with_context(|| format!("сборка PlatformIndex из {}", path.display()))
 }
 
 /// Та же логика, но для уже открытого `HbkContent` (удобно в тестах).

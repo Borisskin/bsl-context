@@ -47,7 +47,8 @@ fn form_readonly_property_assignment_is_high() {
     };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "&НаСервере\nПроцедура Т()\nПараметры = Новый Структура;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     let found = shadowed(&result.errors);
     assert_eq!(found.len(), 1, "{:#?}", result.errors);
     assert_eq!(found[0].confidence, Confidence::High);
@@ -58,7 +59,8 @@ fn form_readonly_property_assignment_is_case_insensitive() {
     let Some(path) = hbk_path() else { return };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "&НаСервере\nПроцедура Т()\nпараметры = Новый Структура;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert_eq!(shadowed(&result.errors).len(), 1, "{:#?}", result.errors);
 }
 
@@ -68,8 +70,14 @@ fn external_processing_form_layout_is_high() {
     let index = load_from_hbk(&path).expect("PlatformIndex");
     // Раскладка v8unpack — ровно та, в которой лежал модуль из инцидента.
     let src = "&НаСервере\nПроцедура Т()\nПараметры = Новый Структура;\nКонецПроцедуры\n";
-    let result =
-        validate_module_with_profile(&index, src, Some(EXTERNAL_FORM_MODULE), None, 1, Profile::Full);
+    let result = validate_module_with_profile(
+        &index,
+        src,
+        Some(EXTERNAL_FORM_MODULE),
+        None,
+        1,
+        Profile::Full,
+    );
     let found = shadowed(&result.errors);
     assert_eq!(found.len(), 1, "{:#?}", result.errors);
     assert_eq!(found[0].confidence, Confidence::High);
@@ -80,7 +88,8 @@ fn form_var_declaration_is_high() {
     let Some(path) = hbk_path() else { return };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "&НаСервере\nПроцедура Т()\nПерем Элементы;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     let found = shadowed(&result.errors);
     assert_eq!(found.len(), 1, "{:#?}", result.errors);
     assert_eq!(found[0].confidence, Confidence::High);
@@ -91,7 +100,8 @@ fn common_module_global_property_assignment_is_high() {
     let Some(path) = hbk_path() else { return };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "Процедура Т()\nДокументы = Новый Массив;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(COMMON_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(COMMON_MODULE), None, 1, Profile::Full);
     let found = shadowed(&result.errors);
     assert_eq!(found.len(), 1, "{:#?}", result.errors);
     assert_eq!(found[0].confidence, Confidence::High);
@@ -103,7 +113,8 @@ fn no_context_procedure_still_checks_global_property() {
     let index = load_from_hbk(&path).expect("PlatformIndex");
     // Глобальный контекст доступен и в процедуре «БезКонтекста».
     let src = "&НаСервереБезКонтекста\nПроцедура Т()\nДокументы = Новый Массив;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert_eq!(shadowed(&result.errors).len(), 1, "{:#?}", result.errors);
 }
 
@@ -121,8 +132,14 @@ fn form_attributes_enable_global_rule_inside_form() {
         .map(|s| s.to_string())
         .collect();
     let src = "&НаСервере\nПроцедура Т()\nСправочники = Новый Соответствие;\nКонецПроцедуры\n";
-    let result =
-        validate_module_with_profile(&index, src, Some(FORM_MODULE), Some(&attrs), 1, Profile::Full);
+    let result = validate_module_with_profile(
+        &index,
+        src,
+        Some(FORM_MODULE),
+        Some(&attrs),
+        1,
+        Profile::Full,
+    );
     let found = shadowed(&result.errors);
     assert_eq!(found.len(), 1, "{:#?}", result.errors);
     assert_eq!(found[0].confidence, Confidence::High);
@@ -139,8 +156,14 @@ fn form_attribute_name_is_silent_even_if_context_occupies_it() {
         .map(|s| s.to_string())
         .collect();
     let src = "&НаСервере\nПроцедура Т(Знач Значение)\nМетаданные = Значение;\nКонецПроцедуры\n";
-    let result =
-        validate_module_with_profile(&index, src, Some(FORM_MODULE), Some(&attrs), 1, Profile::Full);
+    let result = validate_module_with_profile(
+        &index,
+        src,
+        Some(FORM_MODULE),
+        Some(&attrs),
+        1,
+        Profile::Full,
+    );
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -150,7 +173,8 @@ fn without_form_attributes_global_rule_stays_off_inside_form() {
     let index = load_from_hbk(&path).expect("PlatformIndex");
     // Состав реквизитов неизвестен — молчим, чтобы не выдать ложную находку.
     let src = "&НаСервере\nПроцедура Т()\nСправочники = Новый Соответствие;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -163,7 +187,8 @@ fn procedure_parameter_frees_the_name() {
     // Так пишет 1С в УТ: &НаКлиенте Процедура …(УчетнаяЗаписьНастроена, Параметры).
     let src = "&НаКлиенте\nПроцедура Т(Знач Результат, Параметры) Экспорт\n\
                Параметры = Новый Структура;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -174,7 +199,8 @@ fn no_context_procedure_frees_form_member_name() {
     // Идиома БСП: контекста формы нет, форму передают параметром. На УТ 319 мест.
     let src = "&НаКлиентеНаСервереБезКонтекста\nПроцедура Т(Форма)\n\
                Элементы = Форма.Элементы;\nПараметры = Форма.Параметры;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -185,8 +211,14 @@ fn ordinary_form_module_is_silent() {
     // Обычная (неуправляемая) форма: директив компиляции нет, контекст другого
     // типа. На УТ так устроен модуль внешней обработки «Контур EDI» — 30 мест.
     let src = "Процедура КнопкаНажатие(Элемент)\nПараметры = Новый Структура();\nКонецПроцедуры\n";
-    let result =
-        validate_module_with_profile(&index, src, Some(EXTERNAL_FORM_MODULE), None, 1, Profile::Full);
+    let result = validate_module_with_profile(
+        &index,
+        src,
+        Some(EXTERNAL_FORM_MODULE),
+        None,
+        1,
+        Profile::Full,
+    );
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -197,7 +229,8 @@ fn form_method_name_assignment_is_silent() {
     // Реквизит формы можно назвать как метод: в штатной форме учётной записи
     // ЭДО соседствуют `Закрыть = Ложь;` и `Закрыть();`.
     let src = "&НаКлиенте\nПроцедура Т()\nЗакрыть = Ложь;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -208,7 +241,8 @@ fn form_writable_property_assignment_is_silent() {
     // Заголовок доступен для записи: присваивание задаёт заголовок формы —
     // штатный приём. На УТ 1393 места.
     let src = "&НаСервере\nПроцедура Т()\nЗаголовок = \"Тест\";\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -217,7 +251,8 @@ fn member_assignment_through_dot_is_silent() {
     let Some(path) = hbk_path() else { return };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "&НаСервере\nПроцедура Т()\nЭлементы.Список.Видимость = Ложь;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -226,7 +261,8 @@ fn method_call_is_silent() {
     let Some(path) = hbk_path() else { return };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "&НаКлиенте\nПроцедура Т()\nЗакрыть();\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -236,7 +272,8 @@ fn form_attribute_assignment_is_silent() {
     let index = load_from_hbk(&path).expect("PlatformIndex");
     // «Результат» — реквизит формы, а не член ФормаКлиентскогоПриложения.
     let src = "&НаСервере\nПроцедура Т()\nРезультат = \"текст\";\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(FORM_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 
@@ -245,7 +282,8 @@ fn object_module_ignores_form_member() {
     let Some(path) = hbk_path() else { return };
     let index = load_from_hbk(&path).expect("PlatformIndex");
     let src = "Процедура Т()\nПараметры = Новый Структура;\nКонецПроцедуры\n";
-    let result = validate_module_with_profile(&index, src, Some(OBJECT_MODULE), None, 1, Profile::Full);
+    let result =
+        validate_module_with_profile(&index, src, Some(OBJECT_MODULE), None, 1, Profile::Full);
     assert!(shadowed(&result.errors).is_empty(), "{:#?}", result.errors);
 }
 

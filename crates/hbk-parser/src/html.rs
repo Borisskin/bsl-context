@@ -124,8 +124,6 @@ fn walk(node: NodeRef<Node>, st: &mut MdState) {
         Node::Text(text) => {
             if st.in_anchor.is_some() {
                 st.anchor_text.push_str(text);
-            } else if st.in_pre {
-                st.output.push_str(text);
             } else {
                 st.output.push_str(text);
             }
@@ -175,10 +173,7 @@ fn on_open_tag(name: &str, el: &scraper::node::Element, st: &mut MdState) {
             st.output.push_str("* ");
         }
         "a" => {
-            let href = el
-                .attr("href")
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            let href = el.attr("href").map(|s| s.to_string()).unwrap_or_default();
             st.in_anchor = Some(href);
             st.anchor_text.clear();
         }

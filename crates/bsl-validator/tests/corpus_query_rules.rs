@@ -102,9 +102,9 @@ fn query_rules_on_real_ut_corpus() {
         for error in found {
             let key = format!("{:?}", error.kind);
             *by_kind.entry(key.clone()).or_default() += 1;
-            samples
-                .entry(key)
-                .or_insert_with(|| format!("{rel}:{}:{} — {}", error.line, error.col, error.message));
+            samples.entry(key).or_insert_with(|| {
+                format!("{rel}:{}:{} — {}", error.line, error.col, error.message)
+            });
         }
     }
 

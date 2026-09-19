@@ -12,7 +12,9 @@
 
 use std::collections::HashSet;
 
-use bsl_validator::{validate_module_with_symbols, Confidence, ExprErrorKind, Profile, SymbolSource};
+use bsl_validator::{
+    validate_module_with_symbols, Confidence, ExprErrorKind, Profile, SymbolSource,
+};
 use platform_index::{Method, PlatformIndex, Property, Type};
 
 /// Источник-заглушка: фиксированный набор имён по трём коллекциям.
@@ -39,7 +41,10 @@ impl StubSource {
                 .collect(),
             catalogs: ["Номенклатура"].into_iter().map(String::from).collect(),
             documents: HashSet::new(),
-            global_vars: ["параметрыприложения"].into_iter().map(String::from).collect(),
+            global_vars: ["параметрыприложения"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
             knows_global_vars: true,
             silent: false,
         }
@@ -167,7 +172,7 @@ fn attrs(names: &[&str]) -> HashSet<String> {
 }
 
 /// 1. Выдуманный общий модуль без `module_path` (голый фрагмент) — ровно одна
-/// находка `UnknownCommonModule`, `confidence = High`.
+///    находка `UnknownCommonModule`, `confidence = High`.
 #[test]
 fn invented_common_module_without_module_path_is_reported() {
     let index = empty_index();
@@ -251,8 +256,8 @@ fn known_catalog_is_silent() {
 }
 
 /// 5. Затенение присваиванием: имя, которому только что присвоили значение,
-/// не проверяется как общий модуль — ни когда оно реально есть в стабе
-/// (`УправлениеДоступом`), ни когда оно выдумано (`УправлениеПрогрессом`).
+///    не проверяется как общий модуль — ни когда оно реально есть в стабе
+///    (`УправлениеДоступом`), ни когда оно выдумано (`УправлениеПрогрессом`).
 #[test]
 fn assignment_shadows_known_common_module_name() {
     let index = empty_index();
@@ -286,7 +291,7 @@ fn assignment_shadows_invented_common_module_name() {
 }
 
 /// 6. Источник молчит (`object_exists`/`collection_names` возвращают `None`) —
-/// находок нет ни на выдуманном общем модуле, ни на выдуманном справочнике.
+///    находок нет ни на выдуманном общем модуле, ни на выдуманном справочнике.
 #[test]
 fn silent_source_suppresses_common_module_finding() {
     let index = empty_index();
@@ -320,7 +325,7 @@ fn silent_source_suppresses_catalog_finding() {
 }
 
 /// 7. Одноимённые объекты в разных коллекциях: `Номенклатура` есть среди
-/// `Catalogs`, но `Documents` пуста — находка только на втором.
+///    `Catalogs`, но `Documents` пуста — находка только на втором.
 #[test]
 fn same_name_different_collections() {
     let index = empty_index();
@@ -361,7 +366,7 @@ fn same_name_different_collections() {
 }
 
 /// 8. Опечатка в имени общего модуля даёт подсказку («возможно, вы имели в
-/// виду...»), а выдуманное имя, не похожее ни на одно реальное, — нет.
+///    виду...»), а выдуманное имя, не похожее ни на одно реальное, — нет.
 #[test]
 fn typo_gives_suggestion_invented_name_does_not() {
     let index = empty_index();
@@ -659,9 +664,12 @@ fn manager_own_method_is_not_a_metadata_object() {
 fn real_platform_index() -> Option<PlatformIndex> {
     let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH").ok()?;
     let root = std::path::Path::new(&root);
-    let hbk = [root.join("shcntx_ru.hbk"), root.join("bin").join("shcntx_ru.hbk")]
-        .into_iter()
-        .find(|p| p.exists())?;
+    let hbk = [
+        root.join("shcntx_ru.hbk"),
+        root.join("bin").join("shcntx_ru.hbk"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())?;
     platform_index::load_from_hbk(&hbk).ok()
 }
 

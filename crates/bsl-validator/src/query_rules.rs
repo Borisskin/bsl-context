@@ -42,14 +42,20 @@ fn collection_for_kind(kind: &str) -> Option<&'static str> {
         "СПРАВОЧНИК" | "CATALOG" => Some("Catalogs"),
         "ДОКУМЕНТ" | "DOCUMENT" => Some("Documents"),
         "РЕГИСТРСВЕДЕНИЙ" | "INFORMATIONREGISTER" => Some("InformationRegisters"),
-        "РЕГИСТРНАКОПЛЕНИЯ" | "ACCUMULATIONREGISTER" => Some("AccumulationRegisters"),
-        "РЕГИСТРБУХГАЛТЕРИИ" | "ACCOUNTINGREGISTER" => Some("AccountingRegisters"),
+        "РЕГИСТРНАКОПЛЕНИЯ" | "ACCUMULATIONREGISTER" => {
+            Some("AccumulationRegisters")
+        }
+        "РЕГИСТРБУХГАЛТЕРИИ" | "ACCOUNTINGREGISTER" => {
+            Some("AccountingRegisters")
+        }
         "РЕГИСТРРАСЧЕТА" | "CALCULATIONREGISTER" => Some("CalculationRegisters"),
         "ПЛАНВИДОВХАРАКТЕРИСТИК" | "CHARTOFCHARACTERISTICTYPES" => {
             Some("ChartsOfCharacteristicTypes")
         }
         "ПЛАНСЧЕТОВ" | "CHARTOFACCOUNTS" => Some("ChartsOfAccounts"),
-        "ПЛАНВИДОВРАСЧЕТА" | "CHARTOFCALCULATIONTYPES" => Some("ChartsOfCalculationTypes"),
+        "ПЛАНВИДОВРАСЧЕТА" | "CHARTOFCALCULATIONTYPES" => {
+            Some("ChartsOfCalculationTypes")
+        }
         "БИЗНЕСПРОЦЕСС" | "BUSINESSPROCESS" => Some("BusinessProcesses"),
         "ЗАДАЧА" | "TASK" => Some("Tasks"),
         "ПЛАНОБМЕНА" | "EXCHANGEPLAN" => Some("ExchangePlans"),

@@ -104,7 +104,8 @@ fn declaration_rules_on_real_corpus() {
             .to_string_lossy()
             .to_string();
 
-        let result = validate_module_with_profile(&index, &text, Some(&rel), None, 1, Profile::Full);
+        let result =
+            validate_module_with_profile(&index, &text, Some(&rel), None, 1, Profile::Full);
         for err in result.errors.iter().filter(|e| is_declaration_rule(e.kind)) {
             let kind = format!("{:?}", err.kind);
             *by_kind.entry(kind.clone()).or_default() += 1;

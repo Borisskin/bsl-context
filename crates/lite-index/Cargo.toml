@@ -6,7 +6,7 @@ license.workspace = true
 description = "Облегчённый индекс методов конфигурации 1С: только объявления, без графов"
 
 [dependencies]
-bsl-parse = { path = "../bsl-parse" }
+bsl-parse = { path = "../bsl-parse", version = "0.19.0" }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rayon = "1"
 anyhow = { workspace = true }
@@ -14,7 +14,7 @@ walkdir = { workspace = true }
 # Разбор XML выгрузки: состав объекта (реквизиты, измерения, ресурсы) и вид
 # регистра. Поиском подстрок это не берётся — `<Name>` встречается и во
 # вложенных элементах, имя поля обязано читаться у прямого потомка.
-quick-xml = "0.37"
+quick-xml = "0.41"
 
 [dev-dependencies]
 tempfile = { workspace = true }

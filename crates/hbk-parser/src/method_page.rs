@@ -67,7 +67,8 @@ pub fn parse_method_page(html: &str) -> MethodInfo {
             "Пример:" => example = Some(parse_example(&ch.body_html)),
             "См. также:" => related = parse_related_objects(&ch.body_html),
             "Примечание:" => note = Some(parse_note(&ch.body_html)),
-            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" => {}
+            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" =>
+                {}
             _ => {}
         }
     }

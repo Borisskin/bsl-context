@@ -55,6 +55,13 @@ pub type SourceMap = BTreeMap<String, Arc<SourceSlot>>;
 /// /health читал актуальную карту, а не её снимок на момент старта.
 pub type SourceMapHandle = Arc<std::sync::RwLock<Arc<SourceMap>>>;
 
+/// Описание одного источника при первоначальной сборке карты.
+pub type SourceSlotInit = (
+    String,
+    crate::config::SymbolSourceConfig,
+    Result<Option<Arc<dyn SymbolSource>>, String>,
+);
+
 /// Отступ между попытками переподключения. Секунды, а не мгновенно: источник
 /// поднимается людьми (перезапуск code-index) или планировщиком, и долбить его
 /// на каждый вызов бессмысленно — зато после недолгого простоя валидация
@@ -162,14 +169,7 @@ impl BslContextServer {
     /// на старте; дальше карту целиком подменяет перечитка config.toml
     /// (`reload_sources_from_config`), а содержимое слотов меняется пересборкой
     /// индекса конкретной конфигурации.
-    pub fn with_sources(
-        mut self,
-        slots: Vec<(
-            String,
-            crate::config::SymbolSourceConfig,
-            Result<Option<Arc<dyn SymbolSource>>, String>,
-        )>,
-    ) -> Self {
+    pub fn with_sources(mut self, slots: Vec<SourceSlotInit>) -> Self {
         let map: SourceMap = slots
             .into_iter()
             .map(|(name, config, built)| (name, Arc::new(SourceSlot::new(config, built))))
@@ -240,7 +240,10 @@ impl BslContextServer {
                 "default_validation_level",
                 prev.default_validation_level != fresh.default_validation_level,
             ),
-            ("default_profile", prev.default_profile != fresh.default_profile),
+            (
+                "default_profile",
+                prev.default_profile != fresh.default_profile,
+            ),
         ];
         for (name, is_changed) in changed {
             if is_changed {
@@ -266,10 +269,12 @@ impl BslContextServer {
         };
         // Ошибку разбора отдаём вызывающему: карту в этом случае не трогаем вовсе,
         // чтобы опечатка в файле не оставила сервер без рабочих источников.
-        let cfg = crate::config::Config::load_or_default(Some(path))
-            .map_err(|e| format!("{e:#}"))?;
+        let cfg =
+            crate::config::Config::load_or_default(Some(path)).map_err(|e| format!("{e:#}"))?;
         self.warn_on_cold_changes(&cfg);
-        let resolved = cfg.resolved_symbol_sources().map_err(|e| format!("{e:#}"))?;
+        let resolved = cfg
+            .resolved_symbol_sources()
+            .map_err(|e| format!("{e:#}"))?;
 
         let old = self.sources_snapshot();
         let mut new_map: SourceMap = BTreeMap::new();
@@ -335,7 +340,9 @@ impl BslContextServer {
     /// опечатка в конфиге роняла бы сервис).
     pub fn apply_tools_whitelist(mut self, enabled: &[String]) -> Self {
         if enabled.is_empty() {
-            tracing::info!("[tools].enabled пуст — белый список выключен, доступны все инструменты");
+            tracing::info!(
+                "[tools].enabled пуст — белый список выключен, доступны все инструменты"
+            );
             return self;
         }
         let known: BTreeSet<String> = self
@@ -476,7 +483,12 @@ impl BslContextServer {
     /// Собрать индекс во временный файл, снять старый источник, подменить файл,
     /// открыть новый. Старый источник снимается ДО подмены: SQLite держит файл
     /// открытым, и на Windows переименовать поверх него нельзя.
-    async fn rebuild_inner(&self, slot: &SourceSlot, root: &Path, db_path: &Path) -> anyhow::Result<String> {
+    async fn rebuild_inner(
+        &self,
+        slot: &SourceSlot,
+        root: &Path,
+        db_path: &Path,
+    ) -> anyhow::Result<String> {
         if let Some(dir) = db_path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("не удалось создать каталог {}", dir.display()))?;
@@ -501,17 +513,24 @@ impl BslContextServer {
         *guard = None; // закрывает старую базу — иначе Windows не даст её заменить
 
         let (tmp_c, db_c) = (tmp.clone(), db_path.to_path_buf());
-        let swapped = tokio::task::spawn_blocking(move || -> anyhow::Result<symbol_source::LiteSource> {
-            if db_c.exists() {
-                std::fs::remove_file(&db_c)
-                    .with_context(|| format!("не удалось удалить старую базу {}", db_c.display()))?;
-            }
-            std::fs::rename(&tmp_c, &db_c)
-                .with_context(|| format!("не удалось переместить {} → {}", tmp_c.display(), db_c.display()))?;
-            symbol_source::LiteSource::open(&db_c).context("не удалось открыть свежий индекс")
-        })
-        .await
-        .context("задача подмены индекса упала")?;
+        let swapped =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<symbol_source::LiteSource> {
+                if db_c.exists() {
+                    std::fs::remove_file(&db_c).with_context(|| {
+                        format!("не удалось удалить старую базу {}", db_c.display())
+                    })?;
+                }
+                std::fs::rename(&tmp_c, &db_c).with_context(|| {
+                    format!(
+                        "не удалось переместить {} → {}",
+                        tmp_c.display(),
+                        db_c.display()
+                    )
+                })?;
+                symbol_source::LiteSource::open(&db_c).context("не удалось открыть свежий индекс")
+            })
+            .await
+            .context("задача подмены индекса упала")?;
 
         let source = match swapped {
             Ok(source) => source,
@@ -772,7 +791,11 @@ impl BslContextServer {
     pub async fn info(&self, Parameters(p): Parameters<InfoParams>) -> String {
         let kind = p.kind.as_deref().map(str::to_ascii_lowercase);
         let def = match kind.as_deref() {
-            Some("type") => self.engine.find_type(&p.name).cloned().map(Definition::Type),
+            Some("type") => self
+                .engine
+                .find_type(&p.name)
+                .cloned()
+                .map(Definition::Type),
             Some("method") => self
                 .engine
                 .find_method(&p.name)
@@ -905,14 +928,8 @@ impl BslContextServer {
                        Возвращает JSON \
                        {valid, errors:[{line,col,kind,confidence,message,suggestion?}]}."
     )]
-    pub async fn validate_module(
-        &self,
-        Parameters(p): Parameters<ValidateModuleParams>,
-    ) -> String {
-        let level = p
-            .level
-            .unwrap_or(self.default_validation_level)
-            .clamp(1, 3);
+    pub async fn validate_module(&self, Parameters(p): Parameters<ValidateModuleParams>) -> String {
+        let level = p.level.unwrap_or(self.default_validation_level).clamp(1, 3);
         let profile = match p.profile {
             Some(ref s) => Profile::parse_or_default(Some(s)),
             None => self.default_profile,
@@ -1259,10 +1276,15 @@ impl BslContextServer {
             ));
         }
         let (Some(root), Some(db_path)) = (cfg.root.clone(), cfg.db_path.clone()) else {
-            return err_json("для пересборки нужны symbol_source.root и symbol_source.db_path в config.toml");
+            return err_json(
+                "для пересборки нужны symbol_source.root и symbol_source.db_path в config.toml",
+            );
         };
         if !root.is_dir() {
-            return err_json(&format!("symbol_source.root = {} — каталога нет", root.display()));
+            return err_json(&format!(
+                "symbol_source.root = {} — каталога нет",
+                root.display()
+            ));
         }
         // 2. Одна сборка за раз для ЭТОЙ конфигурации — другие слоты пересобираются независимо.
         if slot.rebuilding.swap(true, Ordering::SeqCst) {
@@ -1302,9 +1324,10 @@ impl ServerHandler for BslContextServer {
     ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
         let mut tools = self.tool_router.list_all();
         tools.retain(|t| self.is_tool_allowed(t.name.as_ref()));
-        let mut result = rmcp::model::ListToolsResult::default();
-        result.tools = tools;
-        Ok(result)
+        Ok(rmcp::model::ListToolsResult {
+            tools,
+            ..Default::default()
+        })
     }
 
     async fn call_tool(

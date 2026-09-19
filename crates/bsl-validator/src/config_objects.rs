@@ -42,23 +42,59 @@ use crate::symbols::SymbolSource;
 const MANAGER_COLLECTIONS: &[(&str, &str, &str)] = &[
     ("Справочники", "Catalogs", "СправочникМенеджер"),
     ("Документы", "Documents", "ДокументМенеджер"),
-    ("РегистрыСведений", "InformationRegisters", "РегистрСведенийМенеджер"),
-    ("РегистрыНакопления", "AccumulationRegisters", "РегистрНакопленияМенеджер"),
-    ("РегистрыБухгалтерии", "AccountingRegisters", "РегистрБухгалтерииМенеджер"),
-    ("РегистрыРасчета", "CalculationRegisters", "РегистрРасчетаМенеджер"),
+    (
+        "РегистрыСведений",
+        "InformationRegisters",
+        "РегистрСведенийМенеджер",
+    ),
+    (
+        "РегистрыНакопления",
+        "AccumulationRegisters",
+        "РегистрНакопленияМенеджер",
+    ),
+    (
+        "РегистрыБухгалтерии",
+        "AccountingRegisters",
+        "РегистрБухгалтерииМенеджер",
+    ),
+    (
+        "РегистрыРасчета",
+        "CalculationRegisters",
+        "РегистрРасчетаМенеджер",
+    ),
     ("Перечисления", "Enums", "ПеречислениеМенеджер"),
-    ("ПланыВидовХарактеристик", "ChartsOfCharacteristicTypes", "ПланВидовХарактеристикМенеджер"),
+    (
+        "ПланыВидовХарактеристик",
+        "ChartsOfCharacteristicTypes",
+        "ПланВидовХарактеристикМенеджер",
+    ),
     ("ПланыСчетов", "ChartsOfAccounts", "ПланСчетовМенеджер"),
-    ("ПланыВидовРасчета", "ChartsOfCalculationTypes", "ПланВидовРасчетаМенеджер"),
-    ("БизнесПроцессы", "BusinessProcesses", "БизнесПроцессМенеджер"),
+    (
+        "ПланыВидовРасчета",
+        "ChartsOfCalculationTypes",
+        "ПланВидовРасчетаМенеджер",
+    ),
+    (
+        "БизнесПроцессы",
+        "BusinessProcesses",
+        "БизнесПроцессМенеджер",
+    ),
     ("Задачи", "Tasks", "ЗадачаМенеджер"),
     ("ПланыОбмена", "ExchangePlans", "ПланОбменаМенеджер"),
     ("Константы", "Constants", "КонстантаМенеджер"),
     ("Обработки", "DataProcessors", "ОбработкаМенеджер"),
     ("Отчеты", "Reports", "ОтчетМенеджер"),
-    ("ЖурналыДокументов", "DocumentJournals", "ЖурналДокументовМенеджер"),
+    (
+        "ЖурналыДокументов",
+        "DocumentJournals",
+        "ЖурналДокументовМенеджер",
+    ),
     ("КритерииОтбора", "FilterCriteria", "КритерийОтбораМенеджер"),
-    ("Последовательности", "Sequences", "ПоследовательностьМенеджер"),
+    (
+        "Последовательности",
+        "Sequences",
+        "ПоследовательностьМенеджер",
+    ),
 ];
 
 /// Имена контекста, которых нет в справке платформы, но которые реальны в коде:
@@ -422,14 +458,11 @@ fn manager_type_has_member(index: &PlatformIndex, head: &str, member: &str) -> b
         return false;
     };
     let member_lower = member.to_lowercase();
-    manager_type
-        .methods
-        .iter()
-        .any(|m| m.name_ru.to_lowercase() == member_lower || m.name_en.to_lowercase() == member_lower)
-        || manager_type
-            .properties
-            .iter()
-            .any(|p| p.name_ru.to_lowercase() == member_lower || p.name_en.to_lowercase() == member_lower)
+    manager_type.methods.iter().any(|m| {
+        m.name_ru.to_lowercase() == member_lower || m.name_en.to_lowercase() == member_lower
+    }) || manager_type.properties.iter().any(|p| {
+        p.name_ru.to_lowercase() == member_lower || p.name_en.to_lowercase() == member_lower
+    })
 }
 
 /// Похоже на идентификатор BSL: начинается с буквы или подчёркивания.
@@ -676,9 +709,21 @@ mod tests {
         for (chain, expected) in cases {
             let src = format!("Процедура Тест()\n\tП = {chain};\nКонецПроцедуры\n");
             let found = heads_findings(&src);
-            assert_eq!(found.len(), 1, "ожидалась одна находка на '{chain}': {found:?}");
-            assert_eq!(found[0].suggestion.as_deref(), Some(expected), "подсказка на '{chain}'");
-            assert_eq!(found[0].confidence, Confidence::High, "уверенность на '{chain}'");
+            assert_eq!(
+                found.len(),
+                1,
+                "ожидалась одна находка на '{chain}': {found:?}"
+            );
+            assert_eq!(
+                found[0].suggestion.as_deref(),
+                Some(expected),
+                "подсказка на '{chain}'"
+            );
+            assert_eq!(
+                found[0].confidence,
+                Confidence::High,
+                "уверенность на '{chain}'"
+            );
         }
     }
 
@@ -690,9 +735,15 @@ mod tests {
             eprintln!("skip: BSL_CONTEXT_PLATFORM_PATH не задан");
             return;
         }
-        for chain in ["Справочники.Номенклатура", "Документы.РеализацияТоваровУслуг"] {
+        for chain in [
+            "Справочники.Номенклатура",
+            "Документы.РеализацияТоваровУслуг",
+        ] {
             let src = format!("Процедура Тест()\n\tП = {chain};\nКонецПроцедуры\n");
-            assert!(heads_findings(&src).is_empty(), "ложная находка на '{chain}'");
+            assert!(
+                heads_findings(&src).is_empty(),
+                "ложная находка на '{chain}'"
+            );
         }
     }
 
@@ -706,7 +757,10 @@ mod tests {
         }
         let src = "Процедура Тест()\n\tСправочник = Справочники.Номенклатура;\n\t\
                    П = Справочник.ПустаяСсылка();\nКонецПроцедуры\n";
-        assert!(heads_findings(src).is_empty(), "переменная не должна давать находку");
+        assert!(
+            heads_findings(src).is_empty(),
+            "переменная не должна давать находку"
+        );
     }
 
     /// Обращение к общему модулю конфигурации не похоже ни на одно свойство
@@ -723,7 +777,10 @@ mod tests {
                    ОбщегоНазначения.СообщитьПользователю(\"текст\");\n\t\
                    ОбщегоНазначенияКлиентСервер.ПроверитьПараметр(1, 2);\n\
                    КонецПроцедуры\n";
-        assert!(heads_findings(src).is_empty(), "вызов общего модуля не должен давать находку");
+        assert!(
+            heads_findings(src).is_empty(),
+            "вызов общего модуля не должен давать находку"
+        );
     }
 
     /// Внутри текста запроса `Справочник.Номенклатура` — ПРАВИЛЬНАЯ форма.
@@ -739,7 +796,10 @@ mod tests {
         let src = "Процедура Тест()\n\tЗапрос = Новый Запрос;\n\tЗапрос.Текст = \"\n\t\
                    |ВЫБРАТЬ\n\t|\tТ.Ссылка\n\t|ИЗ\n\t|\tСправочник.Номенклатура КАК Т\";\n\
                    КонецПроцедуры\n";
-        assert!(heads_findings(src).is_empty(), "текст запроса не должен давать находку");
+        assert!(
+            heads_findings(src).is_empty(),
+            "текст запроса не должен давать находку"
+        );
     }
 
     /// КАЖДЫЙ префикс типа-менеджера из `MANAGER_COLLECTIONS` разрешается в тип

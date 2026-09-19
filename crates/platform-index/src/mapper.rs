@@ -6,8 +6,8 @@
 //! - `EnumInfo → Type` переносит `enum_values` (у апстрима этого пути нет — `EnumInfo` теряется).
 
 use hbk_parser::{
-    ConstructorInfo, EnumInfo, EnumValueInfo, MethodInfo, MethodParameterInfo,
-    MethodSignatureInfo, ObjectInfo, PropertyInfo,
+    ConstructorInfo, EnumInfo, EnumValueInfo, MethodInfo, MethodParameterInfo, MethodSignatureInfo,
+    ObjectInfo, PropertyInfo,
 };
 
 use crate::entities::{Constructor, EnumValue, Method, Parameter, Property, Signature, Type};

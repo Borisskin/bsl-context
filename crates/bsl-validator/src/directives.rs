@@ -148,5 +148,4 @@ mod tests {
         assert_eq!(suggestion, "НаКлиенте");
         assert_eq!(distance, 2);
     }
-
 }

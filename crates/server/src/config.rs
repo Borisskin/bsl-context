@@ -196,7 +196,9 @@ impl Default for Config {
 impl Config {
     /// Загрузить конфиг из файла, либо вернуть дефолт.
     pub fn load_or_default(path: Option<&Path>) -> anyhow::Result<Self> {
-        let Some(path) = path else { return Ok(Self::default()) };
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
         let raw = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("read config {}: {}", path.display(), e))?;
         let mut cfg: Config = toml::from_str(&raw)
@@ -224,7 +226,9 @@ impl Config {
             for entry in &self.symbol_sources {
                 let name = match entry.repo.as_deref() {
                     Some(n) if !n.is_empty() => n,
-                    _ => anyhow::bail!("каждая секция [[symbol_sources]] требует непустое поле repo"),
+                    _ => {
+                        anyhow::bail!("каждая секция [[symbol_sources]] требует непустое поле repo")
+                    }
                 };
                 if !seen.insert(name.to_string()) {
                     anyhow::bail!("повторяющийся repo в [[symbol_sources]]: \"{name}\"");
@@ -265,8 +269,14 @@ mod tests {
 
     #[test]
     fn symbol_source_root_parsed() {
-        let cfg: Config = toml::from_str("[symbol_source]\nkind = \"lite\"\ndb_path = \"a.db\"\nroot = \"C:/Repo1C\"\n").unwrap();
-        assert_eq!(cfg.symbol_source.root.as_deref(), Some(std::path::Path::new("C:/Repo1C")));
+        let cfg: Config = toml::from_str(
+            "[symbol_source]\nkind = \"lite\"\ndb_path = \"a.db\"\nroot = \"C:/Repo1C\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.symbol_source.root.as_deref(),
+            Some(std::path::Path::new("C:/Repo1C"))
+        );
     }
 
     #[test]

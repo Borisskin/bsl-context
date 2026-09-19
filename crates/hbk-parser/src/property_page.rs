@@ -35,7 +35,8 @@ pub fn parse_property_page(html: &str) -> PropertyInfo {
             "Использование:" => readonly = parse_readonly(&ch.body_html),
             "См. также:" => related = parse_related_objects(&ch.body_html),
             "Примечание:" => note = Some(parse_note(&ch.body_html)),
-            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" => {}
+            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" =>
+                {}
             _ => {}
         }
     }

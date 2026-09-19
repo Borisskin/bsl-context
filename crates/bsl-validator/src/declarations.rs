@@ -191,8 +191,8 @@ fn scan_structure_tokens(cleaned: &str) -> Vec<(usize, Token)> {
 
         let after = i + word.len();
         // Справа — граница слова: `ФункцияРасчёта` заголовком не является.
-        let right_ok = after >= lower.len()
-            || !lower[after..].chars().next().is_some_and(is_word_char);
+        let right_ok =
+            after >= lower.len() || !lower[after..].chars().next().is_some_and(is_word_char);
 
         if right_ok && starts_statement(&lower, i, prev_end) {
             out.push((i, *token));
@@ -620,7 +620,11 @@ mod tests {
     #[test]
     fn bom_does_not_break_first_header() {
         let src = "\u{FEFF}Процедура Раз() Экспорт\n\tСообщить(1);\nКонецПроцедуры\n";
-        assert!(run(src).is_empty(), "находки на корректном модуле: {:?}", run(src));
+        assert!(
+            run(src).is_empty(),
+            "находки на корректном модуле: {:?}",
+            run(src)
+        );
     }
 
     /// Асинхронный метод — полноценный заголовок. Пока модификатор не

@@ -73,7 +73,10 @@ fn query_rules_with_metadata_on_real_ut_corpus() {
     assert!(root.is_dir(), "корпус не найден: {corpus}");
     let root = root.as_path();
     let db = Path::new(LITE_DB);
-    assert!(db.is_file(), "нет lite-индекса {LITE_DB} — соберите его схемой 3");
+    assert!(
+        db.is_file(),
+        "нет lite-индекса {LITE_DB} — соберите его схемой 3"
+    );
 
     let source = LiteSource::open(db).expect("lite-индекс не открылся");
     let index = PlatformIndex::new();

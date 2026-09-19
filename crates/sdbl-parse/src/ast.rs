@@ -131,7 +131,9 @@ pub struct Query {
 impl Query {
     /// Все источники запроса — и корневой, и присоединённые.
     pub fn all_sources(&self) -> impl Iterator<Item = &Source> {
-        self.sources.iter().chain(self.joins.iter().map(|j| &j.source))
+        self.sources
+            .iter()
+            .chain(self.joins.iter().map(|j| &j.source))
     }
 }
 

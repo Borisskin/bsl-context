@@ -126,7 +126,9 @@ pub fn format_enum_values(values: &[EnumValue], type_name: &str) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Значения системного перечисления {type_name}\n");
     if values.is_empty() {
-        out.push_str("❌ **Не найдено:** у типа нет значений (он не является системным перечислением)\n");
+        out.push_str(
+            "❌ **Не найдено:** у типа нет значений (он не является системным перечислением)\n",
+        );
         return out;
     }
     for v in values {
@@ -165,7 +167,11 @@ fn format_signature_block(parameters: &[crate::entities::Parameter], call_name: 
     if !parameters.is_empty() {
         out.push_str("### Параметры\n");
         for p in parameters {
-            let required_mark = if p.required { "(обязательный)" } else { "" };
+            let required_mark = if p.required {
+                "(обязательный)"
+            } else {
+                ""
+            };
             let desc = if p.description.is_empty() {
                 ""
             } else {
@@ -217,10 +223,7 @@ fn format_method_summary(m: &Method) -> String {
 }
 
 fn format_property_summary(p: &Property) -> String {
-    format!(
-        "- {}: {} - {}\n",
-        p.name_ru, p.type_name, p.description
-    )
+    format!("- {}: {} - {}\n", p.name_ru, p.type_name, p.description)
 }
 
 fn format_constructor_summary(c: &Constructor) -> String {

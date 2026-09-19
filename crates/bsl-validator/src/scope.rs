@@ -84,15 +84,18 @@ fn assign_re() -> &'static Regex {
         // Имя на левой стороне присваивания. Ловим "Идентификатор = ..." с возможным
         // префиксом из пробелов в начале строки. Lookbehind в regex crate нет,
         // поэтому используем (?m:^) и проверяем границы вручную.
-        Regex::new(r"(?m:^)\s*(?P<lhs>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)\s*=\s*(?P<rhs>[^;\n]*)")
-            .unwrap()
+        Regex::new(
+            r"(?m:^)\s*(?P<lhs>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)\s*=\s*(?P<rhs>[^;\n]*)",
+        )
+        .unwrap()
     })
 }
 
 fn new_rhs_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)^\s*(?:Новый|New)\s+(?P<ty>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)").unwrap()
+        Regex::new(r"(?i)^\s*(?:Новый|New)\s+(?P<ty>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)")
+            .unwrap()
     })
 }
 

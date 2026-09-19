@@ -66,7 +66,10 @@ impl LiteSource {
             by_collection
                 .iter()
                 .map(|(collection, names)| {
-                    (collection.clone(), names.iter().map(|n| n.to_lowercase()).collect())
+                    (
+                        collection.clone(),
+                        names.iter().map(|n| n.to_lowercase()).collect(),
+                    )
                 })
                 .collect()
         });
@@ -115,11 +118,18 @@ impl SymbolSource for LiteSource {
     }
 
     fn collection_names(&self, collection: &str) -> Option<HashSet<String>> {
-        self.objects.as_ref().and_then(|by_collection| by_collection.get(collection).cloned())
+        self.objects
+            .as_ref()
+            .and_then(|by_collection| by_collection.get(collection).cloned())
     }
 
     fn object_schema(&self, collection: &str, name_lower: &str) -> Option<ObjectSchema> {
-        let found = match self.index.lock().unwrap().object_schema(collection, name_lower) {
+        let found = match self
+            .index
+            .lock()
+            .unwrap()
+            .object_schema(collection, name_lower)
+        {
             Ok(found) => found?,
             Err(e) => {
                 tracing::warn!(error = %e, collection, "lite-index: ошибка object_schema");
@@ -216,7 +226,10 @@ impl CodeIndexDbSource {
             by_type
                 .iter()
                 .map(|(meta_type, names)| {
-                    (meta_type.clone(), names.iter().map(|n| n.to_lowercase()).collect())
+                    (
+                        meta_type.clone(),
+                        names.iter().map(|n| n.to_lowercase()).collect(),
+                    )
                 })
                 .collect()
         });
@@ -267,8 +280,9 @@ impl CodeIndexDbSource {
              JOIN file_contents fc ON fc.file_id = f.id \
              WHERE f.path LIKE '%ApplicationModule.bsl' OR f.path LIKE '%SessionModule.bsl'",
         )?;
-        let rows =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
 
         let mut out = HashSet::new();
         for row in rows {
@@ -293,9 +307,13 @@ impl CodeIndexDbSource {
     /// Единственный верный источник имён объектов: у объекта может не быть ни
     /// одного модуля, поэтому вывод имён из `functions`/`files` здесь не годится.
     fn collect_objects(conn: &Connection) -> Option<HashMap<String, HashSet<String>>> {
-        let mut stmt = conn.prepare("SELECT meta_type, name FROM metadata_objects").ok()?;
+        let mut stmt = conn
+            .prepare("SELECT meta_type, name FROM metadata_objects")
+            .ok()?;
         let rows = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .ok()?;
         let mut out: HashMap<String, HashSet<String>> = HashMap::new();
         for (meta_type, name) in rows.flatten() {
@@ -310,7 +328,9 @@ impl CodeIndexDbSource {
     fn query_schema(&self, meta_type: &str, name: &str) -> Option<ObjectSchema> {
         let conn = self.conn.lock().ok()?;
         let mut stmt = conn
-            .prepare("SELECT attributes_json FROM metadata_objects WHERE meta_type = ?1 AND name = ?2")
+            .prepare(
+                "SELECT attributes_json FROM metadata_objects WHERE meta_type = ?1 AND name = ?2",
+            )
             .ok()?;
         let json: Option<String> = stmt
             .query_row(params![meta_type, name], |row| row.get(0))
@@ -342,8 +362,9 @@ impl CodeIndexDbSource {
              WHERE (f.path LIKE '%/CommonModules/%.xml' \
                     OR f.path LIKE 'CommonModules/%.xml') AND fc.oversize = 0",
         )?;
-        let rows =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
 
         let mut out = HashSet::new();
         for row in rows {
@@ -393,7 +414,9 @@ impl SymbolSource for CodeIndexDbSource {
                  WHERE fl.path = ?1 AND fn.args LIKE '%) Экспорт%'",
             )
             .ok()?;
-        let rows = stmt.query_map(params![owner], |row| row.get::<_, String>(0)).ok()?;
+        let rows = stmt
+            .query_map(params![owner], |row| row.get::<_, String>(0))
+            .ok()?;
         let mut out = HashSet::new();
         for row in rows {
             // Регистр сворачивается в Rust: SQLite lower() кириллицу не берёт.
@@ -413,7 +436,9 @@ impl SymbolSource for CodeIndexDbSource {
 
     fn collection_names(&self, collection: &str) -> Option<HashSet<String>> {
         let meta_type = meta_type_for_collection(collection)?;
-        self.objects.as_ref().and_then(|by_type| by_type.get(meta_type).cloned())
+        self.objects
+            .as_ref()
+            .and_then(|by_type| by_type.get(meta_type).cloned())
     }
 
     fn object_schema(&self, collection: &str, name_lower: &str) -> Option<ObjectSchema> {
@@ -432,7 +457,10 @@ impl SymbolSource for CodeIndexDbSource {
         }
 
         let schema = self.query_schema(meta_type, &orig);
-        self.schema_cache.lock().unwrap().insert(key, schema.clone());
+        self.schema_cache
+            .lock()
+            .unwrap()
+            .insert(key, schema.clone());
         schema
     }
 
@@ -620,7 +648,7 @@ impl CodeIndexMcpSource {
     }
 
     /// POST к `/mcp` с заголовками и сессией. Общая часть всех вызовов.
-    fn post(&self, body: Value) -> Result<ureq::Response, ureq::Error> {
+    fn post(&self, body: Value) -> Result<ureq::Response, Box<ureq::Error>> {
         let mut req = self
             .agent
             .post(&self.url)
@@ -629,7 +657,7 @@ impl CodeIndexMcpSource {
         if let Some(session_id) = self.session_id.lock().unwrap().clone() {
             req = req.set("Mcp-Session-Id", &session_id);
         }
-        req.send_json(body)
+        req.send_json(body).map_err(Box::new)
     }
 
     /// `tools/call` с одним повтором после протухшей сессии.
@@ -655,11 +683,14 @@ impl CodeIndexMcpSource {
     /// отказ на нём зациклил бы переподключение.
     fn post_tool(&self, body: Value) -> Result<ureq::Response> {
         let first = match self.post(body.clone()) {
-            Err(ureq::Error::Transport(t)) => {
+            Err(error) if matches!(error.as_ref(), ureq::Error::Transport(_)) => {
+                let ureq::Error::Transport(transport) = error.as_ref() else {
+                    unreachable!();
+                };
                 tracing::info!(
                     url = %self.url,
                     repo = %self.repo,
-                    error = %t,
+                    error = %transport,
                     "code-index mcp: обрыв соединения, повторяю запрос по новому"
                 );
                 self.post(body.clone())
@@ -668,7 +699,10 @@ impl CodeIndexMcpSource {
         };
         match first {
             Ok(resp) => Ok(resp),
-            Err(ureq::Error::Status(code @ (404 | 422), resp)) => {
+            Err(error) if matches!(error.as_ref(), ureq::Error::Status(404 | 422, _)) => {
+                let ureq::Error::Status(code, resp) = *error else {
+                    unreachable!();
+                };
                 let reason = resp.into_string().unwrap_or_default();
                 tracing::info!(
                     url = %self.url,
@@ -681,7 +715,7 @@ impl CodeIndexMcpSource {
                     .context("code-index mcp: повторное рукопожатие после отвергнутой сессии")?;
                 Ok(self.post(body)?)
             }
-            Err(e) => Err(e.into()),
+            Err(error) => Err((*error).into()),
         }
     }
 
@@ -797,7 +831,9 @@ impl CodeIndexMcpSource {
         let text = value
             .pointer("/result/content/0/text")
             .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow::anyhow!("code-index mcp: get_file_summary без result.content[0].text"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("code-index mcp: get_file_summary без result.content[0].text")
+            })?;
         let summary: Value =
             serde_json::from_str(text).context("code-index mcp: get_file_summary: не JSON")?;
         export_names_from_summary(&summary)
@@ -811,8 +847,14 @@ impl CodeIndexMcpSource {
         }
         match self.call_objects(meta_type) {
             Ok(Some((lower, orig))) => {
-                self.objects_cache.lock().unwrap().insert(collection.to_string(), lower.clone());
-                self.objects_cache_orig.lock().unwrap().insert(collection.to_string(), orig);
+                self.objects_cache
+                    .lock()
+                    .unwrap()
+                    .insert(collection.to_string(), lower.clone());
+                self.objects_cache_orig
+                    .lock()
+                    .unwrap()
+                    .insert(collection.to_string(), orig);
                 Some(lower)
             }
             // truncated=true: обрезанному набору доверять нельзя — каждый необрезанный
@@ -921,9 +963,9 @@ impl CodeIndexMcpSource {
                 }
             }
         });
-        let resp = self
-            .post_tool(body)
-            .with_context(|| format!("code-index mcp: bsl_sql(attributes_json, {full_name}) не прошёл"))?;
+        let resp = self.post_tool(body).with_context(|| {
+            format!("code-index mcp: bsl_sql(attributes_json, {full_name}) не прошёл")
+        })?;
         let text = resp.into_string().context("code-index mcp: тело ответа")?;
         let value = parse_sse_json(&text)
             .ok_or_else(|| anyhow::anyhow!("code-index mcp: пустой/неразбираемый SSE-ответ"))?;
@@ -985,7 +1027,10 @@ impl SymbolSource for CodeIndexMcpSource {
         }
         match self.call_owner_exports(&owner) {
             Ok(names) => {
-                self.owner_cache.lock().unwrap().insert(owner, names.clone());
+                self.owner_cache
+                    .lock()
+                    .unwrap()
+                    .insert(owner, names.clone());
                 Some(names)
             }
             // `None` — «не знаю», и валидатор промолчит. Пустой набор здесь
@@ -1014,7 +1059,11 @@ impl SymbolSource for CodeIndexMcpSource {
         }
         let meta_type = meta_type_for_collection(collection)?;
         self.objects_for_collection(collection, meta_type)?;
-        self.objects_cache_orig.lock().unwrap().get(collection).cloned()
+        self.objects_cache_orig
+            .lock()
+            .unwrap()
+            .get(collection)
+            .cloned()
     }
 
     fn object_schema(&self, collection: &str, name_lower: &str) -> Option<ObjectSchema> {
@@ -1265,7 +1314,10 @@ fn objects_from_bsl_sql(value: &Value) -> Option<ObjectPage> {
     let mut lower = HashSet::new();
     let mut orig = HashSet::new();
     for row in rows {
-        let Some(full_name) = row.as_array().and_then(|r| r.first()).and_then(|n| n.as_str())
+        let Some(full_name) = row
+            .as_array()
+            .and_then(|r| r.first())
+            .and_then(|n| n.as_str())
         else {
             continue;
         };
@@ -1386,7 +1438,10 @@ enum RepoCheck {
 /// Репозиторий, который известен, но ещё не проиндексирован, проверку ПРОХОДИТ:
 /// он объявлен в конфиге code-index, просто не готов — это не повод не подключаться.
 fn repo_check_from_get_stats(value: &Value, repo: &str) -> RepoCheck {
-    let Some(text) = value.pointer("/result/content/0/text").and_then(|t| t.as_str()) else {
+    let Some(text) = value
+        .pointer("/result/content/0/text")
+        .and_then(|t| t.as_str())
+    else {
         return RepoCheck::Unrecognized;
     };
     let Ok(parsed) = serde_json::from_str::<Value>(text) else {
@@ -1397,7 +1452,9 @@ fn repo_check_from_get_stats(value: &Value, repo: &str) -> RepoCheck {
         return RepoCheck::Known;
     }
     match body.get("message").and_then(|m| m.as_str()) {
-        Some(msg) if msg.contains("Неизвестный repo") => RepoCheck::Unknown(msg.to_string()),
+        Some(msg) if msg.contains("Неизвестный repo") => {
+            RepoCheck::Unknown(msg.to_string())
+        }
         _ => RepoCheck::Unrecognized,
     }
 }
@@ -1494,7 +1551,9 @@ mod tests {
 
     #[test]
     fn found_fns_parsed_from_search_response() {
-        let v = tool_response(r#"{"result":[{"name":"Ф","args":"() Экспорт","file_path":"base/CommonModules/М/Ext/Module.bsl"}]}"#);
+        let v = tool_response(
+            r#"{"result":[{"name":"Ф","args":"() Экспорт","file_path":"base/CommonModules/М/Ext/Module.bsl"}]}"#,
+        );
         let fns = found_fns_from_search(&v).expect("корректный ответ");
         assert_eq!(fns.len(), 1);
         assert_eq!(fns[0].name_lower, "ф");
@@ -1509,8 +1568,12 @@ mod tests {
             r#"{"result":[{"name":"СведенияОВнешнейОбработкеДопустимой","args":"() Экспорт","file_path":"base/CommonModules/М/Ext/Module.bsl"}]}"#,
         );
         let fns = found_fns_from_search(&v).expect("корректный ответ");
-        assert!(!fns.iter().any(|f| f.name_lower == "сведенияовнешнейобработке"));
-        assert!(fns.iter().any(|f| f.name_lower == "сведенияовнешнейобработкедопустимой"));
+        assert!(!fns
+            .iter()
+            .any(|f| f.name_lower == "сведенияовнешнейобработке"));
+        assert!(fns
+            .iter()
+            .any(|f| f.name_lower == "сведенияовнешнейобработкедопустимой"));
     }
 
     // ── протухшая сессия: рукопожатие заново внутри того же вызова ───────
@@ -1547,8 +1610,12 @@ mod tests {
             let valid: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
             let reject_all = Arc::new(AtomicBool::new(false));
             let drop_next = Arc::new(AtomicBool::new(false));
-            let (inits_srv, valid_srv, reject_srv, drop_srv) =
-                (inits.clone(), valid.clone(), reject_all.clone(), drop_next.clone());
+            let (inits_srv, valid_srv, reject_srv, drop_srv) = (
+                inits.clone(),
+                valid.clone(),
+                reject_all.clone(),
+                drop_next.clone(),
+            );
 
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
@@ -1570,11 +1637,17 @@ mod tests {
                             break Some(pos + 4);
                         }
                     };
-                    let Some(header_end) = header_end else { continue };
+                    let Some(header_end) = header_end else {
+                        continue;
+                    };
                     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
                     let content_length = head
                         .lines()
-                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
                         .unwrap_or(0);
                     while buf.len() < header_end + content_length {
                         let n = stream.read(&mut chunk).unwrap();
@@ -1583,11 +1656,17 @@ mod tests {
                         }
                         buf.extend_from_slice(&chunk[..n]);
                     }
-                    let session = head
-                        .lines()
-                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("mcp-session-id:").map(|v| v.trim().to_string()));
-                    let body: Value = serde_json::from_slice(&buf[header_end..]).unwrap_or(Value::Null);
-                    let method = body.get("method").and_then(|m| m.as_str()).unwrap_or_default();
+                    let session = head.lines().find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("mcp-session-id:")
+                            .map(|v| v.trim().to_string())
+                    });
+                    let body: Value =
+                        serde_json::from_slice(&buf[header_end..]).unwrap_or(Value::Null);
+                    let method = body
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or_default();
 
                     let (status, extra_header, payload) = match method {
                         "initialize" => {
@@ -1604,23 +1683,43 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
                                 .to_string(),
                             )
                         }
-                        "notifications/initialized" => ("202 Accepted", String::new(), String::new()),
+                        "notifications/initialized" => {
+                            ("202 Accepted", String::new(), String::new())
+                        }
                         _ if reject_srv.load(Ordering::SeqCst)
-                            || session.as_ref().is_none_or(|s| !valid_srv.lock().unwrap().contains(s)) => {
-                            ("404 Not Found", String::new(), "Not Found: Session not found".to_string())
+                            || session
+                                .as_ref()
+                                .is_none_or(|s| !valid_srv.lock().unwrap().contains(s)) =>
+                        {
+                            (
+                                "404 Not Found",
+                                String::new(),
+                                "Not Found: Session not found".to_string(),
+                            )
                         }
                         "tools/call" => {
-                            let tool = body.pointer("/params/name").and_then(|t| t.as_str()).unwrap_or_default();
+                            let tool = body
+                                .pointer("/params/name")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default();
                             let text = match tool {
-                                "get_stats" => r#"{"repo":"ut","db":{},"daemon":{"status":"ready"}}"#,
-                                "search_function" => r#"{"result":[{"name":"Метод","args":"() Экспорт","file_path":"base/CommonModules/М/Ext/Module.bsl"}]}"#,
+                                "get_stats" => {
+                                    r#"{"repo":"ut","db":{},"daemon":{"status":"ready"}}"#
+                                }
+                                "search_function" => {
+                                    r#"{"result":[{"name":"Метод","args":"() Экспорт","file_path":"base/CommonModules/М/Ext/Module.bsl"}]}"#
+                                }
                                 _ => r#"{"result":[]}"#,
                             };
                             let reply = serde_json::json!({
                                 "jsonrpc": "2.0", "id": body.get("id").cloned().unwrap_or(Value::Null),
                                 "result": {"content": [{"type": "text", "text": text}]}
                             });
-                            ("200 OK", String::new(), format!("event: message\ndata: {reply}\n\n"))
+                            (
+                                "200 OK",
+                                String::new(),
+                                format!("event: message\ndata: {reply}\n\n"),
+                            )
                         }
                         _ => ("400 Bad Request", String::new(), String::new()),
                     };
@@ -1632,7 +1731,13 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
                 }
             });
 
-            Self { url, inits, valid, reject_all, drop_next }
+            Self {
+                url,
+                inits,
+                valid,
+                reject_all,
+                drop_next,
+            }
         }
 
         /// Следующее соединение оборвать без ответа.
@@ -1670,7 +1775,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
             src.method_exists("метод"),
             "после перезапуска code-index имя должно найтись с ПЕРВОГО вызова, а не со второго"
         );
-        assert!(src.is_healthy(), "протухшая сессия — не повод ронять источник");
+        assert!(
+            src.is_healthy(),
+            "протухшая сессия — не повод ронять источник"
+        );
         assert_eq!(fake.inits(), 2, "ровно одно повторное рукопожатие");
 
         // Сессия уже новая: следующее имя (кэшем не покрыто) идёт без рукопожатий.
@@ -1782,7 +1890,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
         );
         match repo_check_from_get_stats(&v, "нет-такого") {
             RepoCheck::Unknown(msg) => {
-                assert!(msg.contains("ut"), "в сообщении должен быть список доступных: {msg}");
+                assert!(
+                    msg.contains("ut"),
+                    "в сообщении должен быть список доступных: {msg}"
+                );
             }
             _ => panic!("неизвестный репозиторий должен быть распознан как Unknown"),
         }
@@ -1799,8 +1910,14 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
 
     #[test]
     fn xml_says_global_reads_flag() {
-        assert!(xml_says_global(&tool_response(r#"{"result":{"content":"<Properties><Global>true</Global></Properties>"}}"#)).unwrap());
-        assert!(!xml_says_global(&tool_response(r#"{"result":{"content":"<Properties><Global>false</Global></Properties>"}}"#)).unwrap());
+        assert!(xml_says_global(&tool_response(
+            r#"{"result":{"content":"<Properties><Global>true</Global></Properties>"}}"#
+        ))
+        .unwrap());
+        assert!(!xml_says_global(&tool_response(
+            r#"{"result":{"content":"<Properties><Global>false</Global></Properties>"}}"#
+        ))
+        .unwrap());
     }
 
     #[test]
@@ -1901,7 +2018,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
 
     #[test]
     fn meta_type_for_collection_known_and_unknown() {
-        assert_eq!(meta_type_for_collection("CommonModules"), Some("CommonModule"));
+        assert_eq!(
+            meta_type_for_collection("CommonModules"),
+            Some("CommonModule")
+        );
         assert_eq!(meta_type_for_collection("Catalogs"), Some("Catalog"));
         assert_eq!(meta_type_for_collection("Enums"), Some("Enum"));
         assert_eq!(meta_type_for_collection("НеизвестнаяКоллекция"), None);
@@ -2046,9 +2166,14 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
         assert_eq!(source.object_exists("Enums", "нетакого"), Some(false));
         // Коллекция, которой в выгрузке вовсе не встретилось, — объектов в ней
         // достоверно нет (не «не знаю»).
-        assert_eq!(source.object_exists("НеизвестнаяКоллекция", "х"), Some(false));
+        assert_eq!(
+            source.object_exists("НеизвестнаяКоллекция", "х"),
+            Some(false)
+        );
 
-        let names = source.collection_names("Enums").expect("подсказки должны быть");
+        let names = source
+            .collection_names("Enums")
+            .expect("подсказки должны быть");
         assert!(names.contains("ТестБезМодуля"));
     }
 
@@ -2093,11 +2218,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
 
     #[test]
     fn code_index_db_source_returns_owner_exports() {
-        let db = std::path::PathBuf::from(
-            std::env::var("BSL_CONTEXT_CORPUS_PATH").unwrap_or_default(),
-        )
-        .join(".code-index")
-        .join("index.db");
+        let db =
+            std::path::PathBuf::from(std::env::var("BSL_CONTEXT_CORPUS_PATH").unwrap_or_default())
+                .join(".code-index")
+                .join("index.db");
         let db = db.as_path();
         if !db.exists() {
             eprintln!("skip: базы code-index нет");
@@ -2108,19 +2232,24 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
             .owner_exports("external/Выгрузка накладных в Docsinbox/Form/Форма/Form.obj.bsl")
             .expect("владелец должен определиться по пути");
         // Экспортные методы модуля объекта этой обработки.
-        assert!(names.contains("сведенияовнешнейобработке"), "получено: {} имён", names.len());
+        assert!(
+            names.contains("сведенияовнешнейобработке"),
+            "получено: {} имён",
+            names.len()
+        );
         assert!(names.contains("выполнитьобменссервисом"));
         // Не-форма → владельца нет.
-        assert!(src.owner_exports("base/Documents/Заказ/Ext/ObjectModule.bsl").is_none());
+        assert!(src
+            .owner_exports("base/Documents/Заказ/Ext/ObjectModule.bsl")
+            .is_none());
     }
 
     #[test]
     fn code_index_db_source_knows_global_exports() {
-        let db = std::path::PathBuf::from(
-            std::env::var("BSL_CONTEXT_CORPUS_PATH").unwrap_or_default(),
-        )
-        .join(".code-index")
-        .join("index.db");
+        let db =
+            std::path::PathBuf::from(std::env::var("BSL_CONTEXT_CORPUS_PATH").unwrap_or_default())
+                .join(".code-index")
+                .join("index.db");
         let db = db.as_path();
         if !db.exists() {
             eprintln!("skip: базы code-index нет");

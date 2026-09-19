@@ -53,13 +53,15 @@ fn temp_table_without_index_is_visible() {
 
 #[test]
 fn package_keeps_all_queries() {
-    let package = parse(
-        "ВЫБРАТЬ 1 КАК Поле ПОМЕСТИТЬ ВТ1;\nВЫБРАТЬ Т.Поле ИЗ ВТ1 КАК Т;\nУНИЧТОЖИТЬ ВТ1",
-    )
-    .expect("пакет не разобран");
+    let package =
+        parse("ВЫБРАТЬ 1 КАК Поле ПОМЕСТИТЬ ВТ1;\nВЫБРАТЬ Т.Поле ИЗ ВТ1 КАК Т;\nУНИЧТОЖИТЬ ВТ1")
+            .expect("пакет не разобран");
     assert_eq!(package.queries.len(), 3);
     assert_eq!(package.queries[0].into.as_ref().unwrap().name, "ВТ1");
-    assert!(matches!(package.queries[1].sources[0].table, Table::Temp(_)));
+    assert!(matches!(
+        package.queries[1].sources[0].table,
+        Table::Temp(_)
+    ));
     assert_eq!(package.queries[2].drop_table.as_ref().unwrap().name, "ВТ1");
 }
 
@@ -71,11 +73,20 @@ fn joins_are_collected_with_kind_and_condition() {
     );
     assert_eq!(query.joins.len(), 1);
     assert_eq!(query.joins[0].kind, JoinKind::Left);
-    let on = query.joins[0].on.as_ref().expect("условие соединения потеряно");
+    let on = query.joins[0]
+        .on
+        .as_ref()
+        .expect("условие соединения потеряно");
     assert!(!on.has_or);
     let paths: Vec<Vec<String>> = on.fields.iter().map(|f| f.path.clone()).collect();
-    assert!(paths.contains(&vec!["Т".to_string(), "Склад".to_string()]), "{paths:?}");
-    assert!(paths.contains(&vec!["С".to_string(), "Ссылка".to_string()]), "{paths:?}");
+    assert!(
+        paths.contains(&vec!["Т".to_string(), "Склад".to_string()]),
+        "{paths:?}"
+    );
+    assert!(
+        paths.contains(&vec!["С".to_string(), "Ссылка".to_string()]),
+        "{paths:?}"
+    );
 }
 
 #[test]
@@ -112,7 +123,9 @@ fn virtual_table_params_are_split() {
         panic!("не метаданные");
     };
     assert_eq!(meta.sub_table.as_deref(), Some("Остатки"));
-    assert!(sdbl_parse::is_virtual_table(meta.sub_table.as_ref().unwrap()));
+    assert!(sdbl_parse::is_virtual_table(
+        meta.sub_table.as_ref().unwrap()
+    ));
     assert!(sdbl_parse::is_register(&meta.kind));
     assert!(meta.has_parens);
     assert_eq!(meta.params.len(), 2, "параметры: {:?}", meta.params);
@@ -232,7 +245,11 @@ fn union_inside_subquery_is_parsed() {
     let Table::Subquery(package) = &query.sources[0].table else {
         panic!("подзапрос не распознан: {:?}", query.sources[0].table);
     };
-    assert_eq!(package.queries.len(), 2, "объединение внутри скобок потеряно");
+    assert_eq!(
+        package.queries.len(),
+        2,
+        "объединение внутри скобок потеряно"
+    );
 }
 
 #[test]
@@ -286,11 +303,22 @@ fn temp_table_created_then_joined_in_same_package() {
     )
     .expect("пакет не разобран");
 
-    assert_eq!(package.queries.len(), 2, "запросы пакета: {:#?}", package.queries);
-    assert_eq!(package.queries[0].into.as_ref().map(|n| n.name.as_str()), Some("ВТТовары"));
+    assert_eq!(
+        package.queries.len(),
+        2,
+        "запросы пакета: {:#?}",
+        package.queries
+    );
+    assert_eq!(
+        package.queries[0].into.as_ref().map(|n| n.name.as_str()),
+        Some("ВТТовары")
+    );
     assert_eq!(package.queries[1].joins.len(), 1, "соединение потеряно");
     let Table::Temp(named) = &package.queries[1].joins[0].source.table else {
-        panic!("соединение не с временной таблицей: {:?}", package.queries[1].joins[0].source.table);
+        panic!(
+            "соединение не с временной таблицей: {:?}",
+            package.queries[1].joins[0].source.table
+        );
     };
     assert_eq!(named.name, "ВТТовары");
 }

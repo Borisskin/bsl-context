@@ -16,7 +16,9 @@ use hbk_parser::{
 use hbk_reader::{HbkContent, Page};
 
 fn hbk_path() -> Option<PathBuf> {
-    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH").ok().map(PathBuf::from)?;
+    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH")
+        .ok()
+        .map(PathBuf::from)?;
     let candidates = [
         root.join("shcntx_ru.hbk"),
         root.join("bin").join("shcntx_ru.hbk"),
@@ -44,7 +46,8 @@ fn find_type_with_constructor(pages: &[Page]) -> Option<(String, String)> {
         // У типа есть дочерняя глава "Конструкторы" — значит у типа есть
         // непустой constructors-каталог.
         for child in &page.children {
-            if child.title.en == "Конструкторы" || child.title.ru == "Конструкторы" {
+            if child.title.en == "Конструкторы" || child.title.ru == "Конструкторы"
+            {
                 // Берём первого конструктора из /ctors/
                 for ctor in &child.children {
                     if ctor.html_path.contains("/ctors/") && !ctor.html_path.is_empty() {
@@ -79,8 +82,8 @@ fn parse_real_method() {
     // Берём конкретный известный метод. У `/methods/` в htmlPath встречаются
     // и страницы-каталоги (без блока «Синтаксис:») — на них наши assert'ы
     // упадут. Конкретное имя — надёжнее.
-    let html_path = find_in_toc(&content.toc.pages, "СтрНайти")
-        .expect("в TOC должен быть метод СтрНайти");
+    let html_path =
+        find_in_toc(&content.toc.pages, "СтрНайти").expect("в TOC должен быть метод СтрНайти");
 
     let html = content.get_entry_text(&html_path).expect("read");
     let info = parse_method_page(&html);
@@ -90,11 +93,17 @@ fn parse_real_method() {
         info.name_ru,
         info.name_en,
         info.signatures.len(),
-        info.signatures.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        info.signatures
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>(),
         info.return_value.as_ref().map(|v| v.type_name.as_str())
     );
     assert_eq!(info.name_ru, "СтрНайти");
-    assert!(!info.signatures.is_empty(), "должна быть хотя бы одна сигнатура");
+    assert!(
+        !info.signatures.is_empty(),
+        "должна быть хотя бы одна сигнатура"
+    );
     // У СтрНайти есть параметры, проверяем что блок «Синтаксис:» прочитан.
     assert!(
         !info.signatures[0].syntax.is_empty(),
@@ -134,7 +143,9 @@ fn parse_real_object() {
 
     // Попробуем популярный тип — ТаблицаЗначений (часто упоминается в карточках).
     let html_path = find_in_toc(&content.toc.pages, "ТаблицаЗначений")
-        .or_else(|| find_with_html_pattern(&content.toc.pages, "/objects/").map(|p| p.html_path.clone()))
+        .or_else(|| {
+            find_with_html_pattern(&content.toc.pages, "/objects/").map(|p| p.html_path.clone())
+        })
         .expect("должна быть найдена страница объекта");
 
     let html = content.get_entry_text(&html_path).expect("read");

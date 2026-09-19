@@ -13,7 +13,9 @@ use hbk_parser::{parse_enum_page, parse_enum_value_page};
 use hbk_reader::{HbkContent, Page};
 
 fn hbk_path() -> Option<PathBuf> {
-    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH").ok().map(PathBuf::from)?;
+    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH")
+        .ok()
+        .map(PathBuf::from)?;
     let candidates = [
         root.join("shcntx_ru.hbk"),
         root.join("bin").join("shcntx_ru.hbk"),
@@ -96,8 +98,8 @@ fn find_first_enum_paths(pages: &[Page]) -> Option<EnumPaths> {
         None
     }
     for root in pages {
-        let is_enum_catalog =
-            root.title.ru == "Системные наборы значений" || root.title.ru == "Системные перечисления";
+        let is_enum_catalog = root.title.ru == "Системные наборы значений"
+            || root.title.ru == "Системные перечисления";
         if is_enum_catalog {
             for ty in &root.children {
                 if let Some(found) = walk_collect(ty) {

@@ -30,6 +30,6 @@ pub use object_page::parse_object_page;
 pub use property_page::parse_property_page;
 
 pub use models::{
-    ConstructorInfo, EnumInfo, EnumValueInfo, MethodInfo, MethodParameterInfo,
-    MethodSignatureInfo, ObjectInfo, PropertyInfo, RelatedObject, ValueInfo,
+    ConstructorInfo, EnumInfo, EnumValueInfo, MethodInfo, MethodParameterInfo, MethodSignatureInfo,
+    ObjectInfo, PropertyInfo, RelatedObject, ValueInfo,
 };

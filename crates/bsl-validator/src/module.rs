@@ -237,9 +237,7 @@ pub fn validate_module_with_profile(
     );
 
     if profile == Profile::Strict {
-        result
-            .errors
-            .retain(|e| e.confidence == Confidence::High);
+        result.errors.retain(|e| e.confidence == Confidence::High);
         result.valid = result.errors.is_empty();
     }
 
@@ -278,9 +276,7 @@ pub fn validate_module_with_symbols(
     );
 
     if profile == Profile::Strict {
-        result
-            .errors
-            .retain(|e| e.confidence == Confidence::High);
+        result.errors.retain(|e| e.confidence == Confidence::High);
         result.valid = result.errors.is_empty();
     }
 
@@ -333,9 +329,7 @@ pub fn validate_module_degraded(
     );
 
     if profile == Profile::Strict {
-        result
-            .errors
-            .retain(|e| e.confidence == Confidence::High);
+        result.errors.retain(|e| e.confidence == Confidence::High);
         result.valid = result.errors.is_empty();
     }
 
@@ -421,7 +415,11 @@ mod tests {
 КонецФункции
 ";
         let names = collect_names(src);
-        assert!(names.contains("мояпроцедура"), "proc не найдена: {:?}", names);
+        assert!(
+            names.contains("мояпроцедура"),
+            "proc не найдена: {:?}",
+            names
+        );
         assert!(names.contains("мояфункция"), "func не найдена: {:?}", names);
     }
 
@@ -486,7 +484,11 @@ EndFunction
             .iter()
             .filter(|e| matches!(e.kind, ExprErrorKind::UnknownDirective))
             .count();
-        assert_eq!(unknown, 1, "должна быть одна UnknownDirective: {:?}", errors);
+        assert_eq!(
+            unknown, 1,
+            "должна быть одна UnknownDirective: {:?}",
+            errors
+        );
         let e = errors
             .iter()
             .find(|e| matches!(e.kind, ExprErrorKind::UnknownDirective))
@@ -648,7 +650,9 @@ EndFunction
             .expect("находка должна остаться — иначе теряется выдуманный вызов");
         assert_eq!(finding.confidence, Confidence::Low);
         assert!(
-            finding.message.contains("Имена конфигурации не проверялись"),
+            finding
+                .message
+                .contains("Имена конфигурации не проверялись"),
             "текст должен называть причину: {}",
             finding.message
         );

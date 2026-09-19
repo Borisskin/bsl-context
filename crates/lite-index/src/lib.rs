@@ -315,9 +315,8 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
                 }
             }
 
-            let mut insert_global_var = tx.prepare(
-                "INSERT INTO global_vars (name, name_lower) VALUES (?1, ?2)",
-            )?;
+            let mut insert_global_var =
+                tx.prepare("INSERT INTO global_vars (name, name_lower) VALUES (?1, ?2)")?;
             for name in &global_var_names {
                 insert_global_var.execute(params![name, name.to_lowercase()])?;
                 global_vars_count += 1;
@@ -447,7 +446,9 @@ struct XmlFacts {
 /// Сам разбор приватен — снаружи с ним работать незачем, но проверять его на
 /// фрагментах настоящей выгрузки необходимо: раскладка тегов оказалась не той,
 /// какой выглядела на первый взгляд.
-pub fn parse_object_xml_for_tests(content: &str) -> (Option<String>, Vec<(String, String, Option<String>)>) {
+pub type ParsedObjectField = (String, String, Option<String>);
+
+pub fn parse_object_xml_for_tests(content: &str) -> (Option<String>, Vec<ParsedObjectField>) {
     let (register_type, fields) = parse_object_xml(content);
     let fields = fields
         .into_iter()
@@ -521,7 +522,10 @@ fn collect_xml_facts(root: &Path) -> XmlFacts {
         if !is_xml {
             continue;
         }
-        let Some(parent_name) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str())
+        let Some(parent_name) = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
         else {
             continue;
         };
@@ -634,7 +638,17 @@ fn parse_object_xml(content: &str) -> (Option<String>, Vec<XmlField>) {
             }
             Ok(Event::Text(e)) => {
                 let Some(target) = want.take() else { continue };
-                let text = e.unescape().unwrap_or_default().trim().to_string();
+                let text = e
+                    .decode()
+                    .ok()
+                    .and_then(|decoded| {
+                        quick_xml::escape::unescape(&decoded)
+                            .ok()
+                            .map(|text| text.into_owned())
+                    })
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
                 if text.is_empty() {
                     continue;
                 }
@@ -702,7 +716,11 @@ struct ParsedModule {
     methods: Vec<MethodDecl>,
 }
 
-fn parse_module(root: &Path, path: &Path, global_modules: &HashSet<String>) -> Option<ParsedModule> {
+fn parse_module(
+    root: &Path,
+    path: &Path,
+    global_modules: &HashSet<String>,
+) -> Option<ParsedModule> {
     let rel = path.strip_prefix(root).ok()?;
     let rel_path = rel.to_string_lossy().replace('\\', "/");
 
@@ -775,7 +793,10 @@ pub fn owner_module_path(rel_path: &str) -> Option<String> {
         && segments[2].eq_ignore_ascii_case("Form")
         && segments[4].eq_ignore_ascii_case("Form.obj.bsl")
     {
-        Some(format!("{}/{}/ExternalDataProcessor.obj.bsl", segments[0], segments[1]))
+        Some(format!(
+            "{}/{}/ExternalDataProcessor.obj.bsl",
+            segments[0], segments[1]
+        ))
     } else {
         None
     }
@@ -792,9 +813,11 @@ fn parse_path(rel_path: &str) -> ParsedPath {
     }
     .to_string();
 
-    let collection_idx = segments
-        .iter()
-        .position(|seg| KNOWN_COLLECTIONS.iter().any(|k| k.eq_ignore_ascii_case(seg)));
+    let collection_idx = segments.iter().position(|seg| {
+        KNOWN_COLLECTIONS
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(seg))
+    });
     let collection = collection_idx.map(|i| {
         KNOWN_COLLECTIONS
             .iter()
@@ -929,7 +952,9 @@ impl LiteIndex {
     /// Для источников, которые кэшируют индекс в памяти вместо построчного
     /// запроса `method_exists` на каждую проверку (см. крейт `symbol-source`).
     pub fn all_method_names(&self) -> Result<HashSet<String>> {
-        let mut stmt = self.conn.prepare("SELECT DISTINCT name_lower FROM methods")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT name_lower FROM methods")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = HashSet::new();
         for row in rows {
@@ -961,8 +986,9 @@ impl LiteIndex {
         }
 
         let mut stmt = self.conn.prepare("SELECT collection, name FROM objects")?;
-        let rows =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
         let mut out: HashMap<String, HashSet<String>> = HashMap::new();
         for row in rows {
             let (collection, name) = row?;
@@ -987,7 +1013,11 @@ impl LiteIndex {
     /// `None` — таблицы `object_fields` в базе нет (индекс собран схемой 2 или
     /// раньше) либо такого объекта нет: и то и другое означает «не знаю»,
     /// и правило на этом обязано молчать. Пересобрать индекс — `rebuild_symbol_index`.
-    pub fn object_schema(&self, collection: &str, name_lower: &str) -> Result<Option<ObjectFields>> {
+    pub fn object_schema(
+        &self,
+        collection: &str,
+        name_lower: &str,
+    ) -> Result<Option<ObjectFields>> {
         if !self.has_table("object_fields")? {
             return Ok(None);
         }
@@ -1094,7 +1124,10 @@ mod tests {
 
     #[test]
     fn owner_module_path_none_for_base_module() {
-        assert_eq!(owner_module_path("base/Documents/Заказ/Ext/ObjectModule.bsl"), None);
+        assert_eq!(
+            owner_module_path("base/Documents/Заказ/Ext/ObjectModule.bsl"),
+            None
+        );
     }
 
     #[test]

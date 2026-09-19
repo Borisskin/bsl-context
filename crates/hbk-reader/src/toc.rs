@@ -149,10 +149,10 @@ impl TokenStream {
             .next()
             .ok_or_else(|| HbkError::TocParse(format!("{ctx}: не найден токен (конец данных)")))?;
         // Длина проверяется первой: у токена ровно из одного символа `"` (его
-    // оставляет `tokenize`, когда данные оборвались на открывающей кавычке)
-    // обе проверки на кавычки истинны, и срез `[1..len-1]` паникует. Битый
-    // блок должен давать TocParse, как все прочие искажения формата здесь.
-    if got.len() < 2 || !got.starts_with('"') || !got.ends_with('"') {
+        // оставляет `tokenize`, когда данные оборвались на открывающей кавычке)
+        // обе проверки на кавычки истинны, и срез `[1..len-1]` паникует. Битый
+        // блок должен давать TocParse, как все прочие искажения формата здесь.
+        if got.len() < 2 || !got.starts_with('"') || !got.ends_with('"') {
             return Err(HbkError::TocParse(format!(
                 "{ctx}: ожидалась строка в кавычках, получено '{got}'"
             )));
@@ -265,10 +265,7 @@ fn build_tree(chunks: Vec<Chunk>) -> Toc {
     let mut parent_of: HashMap<i32, i32> = HashMap::with_capacity(chunks.len());
     let mut order: Vec<i32> = Vec::with_capacity(chunks.len());
 
-    pages.insert(
-        0,
-        Page::new(DoubleLanguageString::new("TOC", "TOC"), ""),
-    );
+    pages.insert(0, Page::new(DoubleLanguageString::new("TOC", "TOC"), ""));
 
     for chunk in chunks {
         let title = chunk_title(&chunk);
@@ -366,10 +363,7 @@ mod tests {
     fn tokenize_escaped_quote_inside_string() {
         let toks = tokenize(r#"{"ru" "Имя""с""кавычками"}"#);
         // экранирование "" → одиночная кавычка внутри строки
-        assert_eq!(
-            toks,
-            vec!["{", "\"ru\"", "\"Имя\"с\"кавычками\"", "}"]
-        );
+        assert_eq!(toks, vec!["{", "\"ru\"", "\"Имя\"с\"кавычками\"", "}"]);
     }
 
     #[test]

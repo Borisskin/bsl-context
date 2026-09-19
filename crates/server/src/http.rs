@@ -94,11 +94,8 @@ pub fn router(config: Config, mcp: Option<BslContextServer>) -> Router {
             .with_stateful_mode(false)
             .with_json_response(true)
             .with_allowed_hosts(allowed_hosts);
-        let http_service = StreamableHttpService::new(
-            service_factory,
-            session_manager,
-            http_config,
-        );
+        let http_service =
+            StreamableHttpService::new(service_factory, session_manager, http_config);
         router = router.nest_service("/mcp", http_service);
     } else {
         router = router.route("/mcp", post(mcp_placeholder));

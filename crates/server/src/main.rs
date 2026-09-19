@@ -3,16 +3,20 @@
 //! Phase 0 (bootstrap) — HTTP-сервер с /health и заглушкой /mcp, без логики.
 //! Дальнейшие фазы добавляют hbk-парсер, индекс, MCP-tools.
 
+use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use clap::Parser;
 use tracing::{error, info};
 
 use bsl_context_server::sources::build_symbol_source;
 use bsl_context_server::{config, http, mcp_server, pid_lock};
 
 #[derive(Parser, Debug)]
-#[command(name = "bsl-context-rs", version, about = "MCP-сервер контекста платформы 1С")]
+#[command(
+    name = "bsl-context-rs",
+    version,
+    about = "MCP-сервер контекста платформы 1С"
+)]
 struct Cli {
     /// Путь к config.toml. Если не указан — используются дефолты.
     #[arg(short = 'c', long = "config", value_name = "PATH")]
@@ -94,11 +98,10 @@ async fn main() -> anyhow::Result<()> {
         match hbk_candidates.into_iter().find(|p| p.exists()) {
             Some(hbk) => {
                 info!(?hbk, "загрузка платформенного индекса");
-                let index = tokio::task::spawn_blocking(move || {
-                    platform_index::load_from_hbk(&hbk)
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("задача загрузки индекса упала: {e}"))??;
+                let index =
+                    tokio::task::spawn_blocking(move || platform_index::load_from_hbk(&hbk))
+                        .await
+                        .map_err(|e| anyhow::anyhow!("задача загрузки индекса упала: {e}"))??;
                 info!(
                     types = index.types.len(),
                     enum_types = index.enum_types_count(),
@@ -169,8 +172,8 @@ fn init_tracing(cfg: &config::Config) {
         .filename_suffix("log")
         .build(&cfg.log_dir)
         .expect("failed to initialize rolling file appender");
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)

@@ -83,15 +83,17 @@ pub fn validate_enum(index: &PlatformIndex, type_name: &str, value_name: &str) -
             all_valid_values: Vec::new(),
             similar: Vec::new(),
             open_collection: false,
-            message: format!("❌ Тип '{}' не является системным перечислением.", ty.name_ru),
+            message: format!(
+                "❌ Тип '{}' не является системным перечислением.",
+                ty.name_ru
+            ),
         };
     }
 
     let value_lower = value_name.to_lowercase();
-    let valid = ty
-        .enum_values
-        .iter()
-        .any(|v| v.name_ru.to_lowercase() == value_lower || v.name_en.to_lowercase() == value_lower);
+    let valid = ty.enum_values.iter().any(|v| {
+        v.name_ru.to_lowercase() == value_lower || v.name_en.to_lowercase() == value_lower
+    });
 
     let all_valid_values: Vec<String> = ty.enum_values.iter().map(|v| v.name_ru.clone()).collect();
     let open_collection = ty.is_open_enum();
@@ -295,7 +297,12 @@ fn top_similar(query: &str, values: &[platform_index::EnumValue], top: usize) ->
             [v.name_ru.as_str(), v.name_en.as_str()]
                 .into_iter()
                 .filter(|n| !n.is_empty())
-                .map(move |n| (similarity_score(query, &n.to_lowercase()), v.name_ru.as_str()))
+                .map(move |n| {
+                    (
+                        similarity_score(query, &n.to_lowercase()),
+                        v.name_ru.as_str(),
+                    )
+                })
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -429,9 +436,13 @@ mod tests {
     fn variadic_max_accepts_many_args() {
         use platform_index::PlatformIndex;
         let mut idx = PlatformIndex::new();
-        idx.global_methods.push(method_1param("Макс", "Значение1", true));
+        idx.global_methods
+            .push(method_1param("Макс", "Значение1", true));
         assert!(validate_method_call(&idx, "Макс", 1).valid);
-        assert!(validate_method_call(&idx, "Макс", 5).valid, "Макс вариативна");
+        assert!(
+            validate_method_call(&idx, "Макс", 5).valid,
+            "Макс вариативна"
+        );
         assert!(!validate_method_call(&idx, "Макс", 0).valid, "ниже min");
     }
 
@@ -448,13 +459,32 @@ mod tests {
                 name: "Основная".into(),
                 description: String::new(),
                 parameters: vec![
-                    Parameter { name: "Шаблон".into(), type_name: String::new(), required: true, description: String::new() },
-                    Parameter { name: "Значение1-Значение10".into(), type_name: String::new(), required: false, description: String::new() },
+                    Parameter {
+                        name: "Шаблон".into(),
+                        type_name: String::new(),
+                        required: true,
+                        description: String::new(),
+                    },
+                    Parameter {
+                        name: "Значение1-Значение10".into(),
+                        type_name: String::new(),
+                        required: false,
+                        description: String::new(),
+                    },
                 ],
             }],
         });
-        assert!(validate_method_call(&idx, "СтрШаблон", 3).valid, "Шаблон + 2 значения");
-        assert!(validate_method_call(&idx, "СтрШаблон", 11).valid, "Шаблон + 10 значений");
-        assert!(!validate_method_call(&idx, "СтрШаблон", 12).valid, "11 значений — превышение");
+        assert!(
+            validate_method_call(&idx, "СтрШаблон", 3).valid,
+            "Шаблон + 2 значения"
+        );
+        assert!(
+            validate_method_call(&idx, "СтрШаблон", 11).valid,
+            "Шаблон + 10 значений"
+        );
+        assert!(
+            !validate_method_call(&idx, "СтрШаблон", 12).valid,
+            "11 значений — превышение"
+        );
     }
 }

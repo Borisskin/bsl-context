@@ -22,8 +22,13 @@ use platform_index::load_from_hbk;
 use rmcp::handler::server::wrapper::Parameters;
 
 fn hbk_path() -> Option<PathBuf> {
-    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH").ok().map(PathBuf::from)?;
-    let candidates = [root.join("shcntx_ru.hbk"), root.join("bin").join("shcntx_ru.hbk")];
+    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH")
+        .ok()
+        .map(PathBuf::from)?;
+    let candidates = [
+        root.join("shcntx_ru.hbk"),
+        root.join("bin").join("shcntx_ru.hbk"),
+    ];
     candidates.into_iter().find(|p| p.exists())
 }
 
@@ -46,12 +51,17 @@ async fn search_finds_real_method() {
         }))
         .await;
     println!("--- search('СтрНайти') ---\n{md}");
-    assert!(md.contains("СтрНайти"), "результат должен содержать имя метода");
+    assert!(
+        md.contains("СтрНайти"),
+        "результат должен содержать имя метода"
+    );
 }
 
 #[tokio::test]
 async fn info_returns_type_card() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let md = srv
         .info(Parameters(InfoParams {
             name: "ТаблицаЗначений".into(),
@@ -65,7 +75,9 @@ async fn info_returns_type_card() {
 
 #[tokio::test]
 async fn get_member_returns_method() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let md = srv
         .get_member(Parameters(GetMemberParams {
             type_name: "ТаблицаЗначений".into(),
@@ -78,7 +90,9 @@ async fn get_member_returns_method() {
 
 #[tokio::test]
 async fn get_members_value_table() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let md = srv
         .get_members(Parameters(TypeNameParams {
             type_name: "ТаблицаЗначений".into(),
@@ -92,7 +106,9 @@ async fn get_members_value_table() {
 
 #[tokio::test]
 async fn get_constructors_returns_real_signatures() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let md = srv
         .get_constructors(Parameters(TypeNameParams {
             type_name: "ТаблицаЗначений".into(),
@@ -108,7 +124,9 @@ async fn get_constructors_returns_real_signatures() {
 
 #[tokio::test]
 async fn get_enum_values_canonical_638() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let md = srv
         .get_enum_values(Parameters(TypeNameParams {
             type_name: "ТипРазмещенияТекстаТабличногоДокумента".into(),
@@ -122,7 +140,9 @@ async fn get_enum_values_canonical_638() {
 
 #[tokio::test]
 async fn get_enum_values_rejects_non_enum_type() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let md = srv
         .get_enum_values(Parameters(TypeNameParams {
             type_name: "ТаблицаЗначений".into(),
@@ -135,7 +155,9 @@ async fn get_enum_values_rejects_non_enum_type() {
 #[tokio::test]
 async fn validate_enum_canonical_638() {
     // Канонический баг #638: 'Перенос' нет, должно быть 'Переносить'.
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let json = srv
         .validate_enum(Parameters(ValidateEnumParams {
             type_name: "ТипРазмещенияТекстаТабличногоДокумента".into(),
@@ -159,7 +181,9 @@ async fn validate_enum_canonical_638() {
 
 #[tokio::test]
 async fn validate_enum_accepts_valid_value() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let json = srv
         .validate_enum(Parameters(ValidateEnumParams {
             type_name: "ТипРазмещенияТекстаТабличногоДокумента".into(),
@@ -174,7 +198,9 @@ async fn validate_enum_accepts_valid_value() {
 async fn validate_enum_accepts_value_with_english_synonym() {
     // Issue #2: `Windows_x86 (Windows_x86)` в справке — синоним с `_` не
     // отрезался, и значение объявлялось несуществующим.
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     for (ty, val) in [
         ("ТипПлатформы", "Windows_x86"),
         ("ВариантИнтерфейсаКлиентскогоПриложения", "Версия8_2"),
@@ -201,7 +227,9 @@ async fn validate_enum_accepts_value_with_english_synonym() {
 #[tokio::test]
 async fn validate_enum_open_collection_is_not_rejected() {
     // Issue #2: `ЦветаСтиля` / `БиблиотекаКартинок` пополняет конфигурация.
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     for ty in ["ЦветаСтиля", "БиблиотекаКартинок"] {
         let json = srv
             .validate_enum(Parameters(ValidateEnumParams {
@@ -217,7 +245,9 @@ async fn validate_enum_open_collection_is_not_rejected() {
 
 #[tokio::test]
 async fn validate_method_call_rejects_extra_argument() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     // У 'СтрНайти' максимум 5 аргументов (Строка, Подстрока, НаправлениеПоиска,
     // НачальнаяПозиция, НомерВхождения). 6 аргументов должно дать valid=false.
     let json = srv
@@ -230,14 +260,16 @@ async fn validate_method_call_rejects_extra_argument() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["valid"], false);
     assert!(
-        v["signatures"].as_array().unwrap().len() >= 1,
+        !v["signatures"].as_array().unwrap().is_empty(),
         "должна быть минимум одна сигнатура"
     );
 }
 
 #[tokio::test]
 async fn validate_method_call_accepts_normal_call() {
-    let Some(srv) = make_server().await else { return };
+    let Some(srv) = make_server().await else {
+        return;
+    };
     let json = srv
         .validate_method_call(Parameters(ValidateMethodCallParams {
             method_name: "СтрНайти".into(),
@@ -275,41 +307,63 @@ async fn tools_whitelist_hides_and_blocks_tools() {
 
 #[tokio::test]
 async fn rebuild_symbol_index_refuses_when_source_is_not_lite() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     // Слот сконфигурирован, но источник — не lite (например, прямое чтение базы
     // code-index): пересобирать через этот инструмент нечего, это чужой индекс.
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "code_index_db".to_string();
-    cfg.db_path = Some(std::path::PathBuf::from(r"C:\Repo1C\.code-index\index.db"));
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "code_index_db".to_string(),
+        db_path: Some(std::path::PathBuf::from(r"C:\Repo1C\.code-index\index.db")),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Ok(None))]);
 
     let json = srv
-        .rebuild_symbol_index(Parameters(RebuildSymbolIndexParams { repo: Some("ut".to_string()) }))
+        .rebuild_symbol_index(Parameters(RebuildSymbolIndexParams {
+            repo: Some("ut".to_string()),
+        }))
         .await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], false);
-    assert!(v["message"].as_str().unwrap().contains("пересобирать нечего"));
+    assert!(v["message"]
+        .as_str()
+        .unwrap()
+        .contains("пересобирать нечего"));
 }
 
 #[tokio::test]
 async fn rebuild_symbol_index_builds_database_and_creates_directory() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let corpus = std::env::var("BSL_CONTEXT_CORPUS_PATH").unwrap_or_default();
     let root = std::path::Path::new(&corpus);
-    if !root.exists() { eprintln!("skip: корпуса нет — задайте BSL_CONTEXT_CORPUS_PATH"); return; }
+    if !root.exists() {
+        eprintln!("skip: корпуса нет — задайте BSL_CONTEXT_CORPUS_PATH");
+        return;
+    }
     // Каталога заведомо нет — инструмент обязан его создать.
-    let dir = std::env::temp_dir().join("bslctx_rebuild_test").join("nested");
+    let dir = std::env::temp_dir()
+        .join("bslctx_rebuild_test")
+        .join("nested");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     let db = dir.join("wms_lite.db");
 
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "lite".to_string();
-    cfg.root = Some(root.to_path_buf());
-    cfg.db_path = Some(db.clone());
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "lite".to_string(),
+        root: Some(root.to_path_buf()),
+        db_path: Some(db.clone()),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("wms".to_string(), cfg, Ok(None))]);
 
     let json = srv
-        .rebuild_symbol_index(Parameters(RebuildSymbolIndexParams { repo: Some("wms".to_string()) }))
+        .rebuild_symbol_index(Parameters(RebuildSymbolIndexParams {
+            repo: Some("wms".to_string()),
+        }))
         .await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], true, "ответ: {json}");
@@ -328,7 +382,10 @@ async fn rebuild_symbol_index_builds_database_and_creates_directory() {
 /// сетевой источник ронял свой `healthy` навсегда, а пересоздать его было нечем.
 #[tokio::test]
 async fn validate_module_reconnects_source_on_demand() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let dir = std::env::temp_dir().join("bslctx_reconnect_test");
     let _ = std::fs::remove_dir_all(&dir);
     let root = dir.join("dump");
@@ -344,10 +401,12 @@ async fn validate_module_reconnects_source_on_demand() {
     lite_index::build(&root, &db, 0).expect("сборка индекса");
 
     // Слот настроен и база на месте, но источник в памяти НЕ поднят.
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "lite".to_string();
-    cfg.root = Some(root.clone());
-    cfg.db_path = Some(db.clone());
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "lite".to_string(),
+        root: Some(root.clone()),
+        db_path: Some(db.clone()),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Ok(None))]);
     assert!(srv.slot("ut").unwrap().source.read().await.is_none());
 
@@ -378,10 +437,15 @@ async fn validate_module_reconnects_source_on_demand() {
 
 #[tokio::test]
 async fn validate_module_rejects_unknown_repo() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "lite".to_string();
-    cfg.db_path = Some(std::path::PathBuf::from(r"C:\tools\bsl-context\ut_lite.db"));
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "lite".to_string(),
+        db_path: Some(std::path::PathBuf::from(r"C:\tools\bsl-context\ut_lite.db")),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Ok(None))]);
 
     let json = srv
@@ -404,10 +468,15 @@ async fn validate_module_rejects_unknown_repo() {
 
 #[tokio::test]
 async fn validate_module_requires_repo_when_sources_configured() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "lite".to_string();
-    cfg.db_path = Some(std::path::PathBuf::from(r"C:\tools\bsl-context\ut_lite.db"));
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "lite".to_string(),
+        db_path: Some(std::path::PathBuf::from(r"C:\tools\bsl-context\ut_lite.db")),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Ok(None))]);
 
     let json = srv
@@ -427,7 +496,10 @@ async fn validate_module_requires_repo_when_sources_configured() {
 
 #[tokio::test]
 async fn validate_module_without_sources_checks_platform_only() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     // Ни одной конфигурации не настроено — repo не нужен, проверка идёт только
     // против справки платформы (как до появления параметра repo).
     let json = srv
@@ -441,19 +513,27 @@ async fn validate_module_without_sources_checks_platform_only() {
         }))
         .await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(v.get("valid").is_some(), "ожидался обычный результат валидации: {json}");
+    assert!(
+        v.get("valid").is_some(),
+        "ожидался обычный результат валидации: {json}"
+    );
 }
 
 #[tokio::test]
 async fn validate_module_degrades_when_lite_index_not_built() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     // Слот настроен (kind = "lite"), но источник — None: rebuild_symbol_index ни разу
     // не запускали. Отказывать нельзя: платформенный индекс исправен, и проверки
     // против него от имён конфигурации не зависят. Ответ — находки плюс признак
     // неполноты, а не {ok:false}.
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "lite".to_string();
-    cfg.db_path = Some(std::path::PathBuf::from(r"C:\tools\bsl-context\ut_lite.db"));
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "lite".to_string(),
+        db_path: Some(std::path::PathBuf::from(r"C:\tools\bsl-context\ut_lite.db")),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Ok(None))]);
 
     let json = srv
@@ -467,8 +547,14 @@ async fn validate_module_degrades_when_lite_index_not_built() {
         }))
         .await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(v.get("valid").is_some(), "ожидалась валидация, а не отказ: {json}");
-    assert_eq!(v["symbols_available"], false, "признак неполноты обязателен: {json}");
+    assert!(
+        v.get("valid").is_some(),
+        "ожидалась валидация, а не отказ: {json}"
+    );
+    assert_eq!(
+        v["symbols_available"], false,
+        "признак неполноты обязателен: {json}"
+    );
     assert!(
         v["degraded_reason"]
             .as_str()
@@ -484,11 +570,16 @@ async fn validate_module_degrades_when_lite_index_not_built() {
 /// вызов отвечал `{ok:false}`, и выдуманный метод проходил в готовый код.
 #[tokio::test]
 async fn validate_module_degraded_still_finds_invented_call() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "code_index_mcp".to_string();
-    cfg.url = Some("http://127.0.0.1:1/mcp".to_string());
-    cfg.repo = Some("ut".to_string());
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "code_index_mcp".to_string(),
+        url: Some("http://127.0.0.1:1/mcp".to_string()),
+        repo: Some("ut".to_string()),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![(
         "ut".to_string(),
         cfg,
@@ -506,20 +597,34 @@ async fn validate_module_degraded_still_finds_invented_call() {
         }))
         .await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["symbols_available"], false, "признак неполноты обязателен: {json}");
+    assert_eq!(
+        v["symbols_available"], false,
+        "признак неполноты обязателен: {json}"
+    );
     let errors = v["errors"].as_array().expect("errors обязателен");
     let finding = errors
         .iter()
-        .find(|e| e["message"].as_str().unwrap_or_default().contains("СЕГОДНЯ"))
+        .find(|e| {
+            e["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("СЕГОДНЯ")
+        })
         .unwrap_or_else(|| panic!("находка по СЕГОДНЯ должна остаться: {json}"));
     // §4 п.2: находка остаётся, но с пониженной уверенностью — без имён
     // конфигурации утверждать «метода нет нигде» валидатор не вправе.
-    assert_eq!(finding["confidence"], "low", "уверенность должна быть понижена: {json}");
+    assert_eq!(
+        finding["confidence"], "low",
+        "уверенность должна быть понижена: {json}"
+    );
     // Текст последней ошибки подключения виден вызывающему, а не только в журнале.
     // Ошибка здесь — от повторной попытки (её сервер делает перед отказом), а не
     // та, что передана в слот на старте: смысл проверки в том, что причина названа.
     assert!(
-        v["degraded_reason"].as_str().unwrap().contains("initialize"),
+        v["degraded_reason"]
+            .as_str()
+            .unwrap()
+            .contains("initialize"),
         "причина отказа источника должна быть в ответе: {json}"
     );
 }
@@ -529,11 +634,16 @@ async fn validate_module_degraded_still_finds_invented_call() {
 /// на каждый вызов процедуры глобального общего модуля.
 #[tokio::test]
 async fn validate_module_degraded_has_no_high_undeclared() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "code_index_mcp".to_string();
-    cfg.url = Some("http://127.0.0.1:1/mcp".to_string());
-    cfg.repo = Some("ut".to_string());
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "code_index_mcp".to_string(),
+        url: Some("http://127.0.0.1:1/mcp".to_string()),
+        repo: Some("ut".to_string()),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Err("нет связи".to_string()))]);
 
     let json = srv
@@ -555,18 +665,26 @@ async fn validate_module_degraded_has_no_high_undeclared() {
         .iter()
         .filter(|e| e["kind"] == "undeclared_method" && e["confidence"] == "high")
         .count();
-    assert_eq!(high_undeclared, 0, "лавина ложных High не должна вернуться: {json}");
+    assert_eq!(
+        high_undeclared, 0,
+        "лавина ложных High не должна вернуться: {json}"
+    );
 }
 
 /// §7.1 ТЗ: состояние источников видно отдельным вызовом, без разбора текста
 /// сообщения об ошибке.
 #[tokio::test]
 async fn symbol_sources_status_reports_state_and_error() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "code_index_mcp".to_string();
-    cfg.url = Some("http://127.0.0.1:1/mcp".to_string());
-    cfg.repo = Some("ut".to_string());
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "code_index_mcp".to_string(),
+        url: Some("http://127.0.0.1:1/mcp".to_string()),
+        repo: Some("ut".to_string()),
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![(
         "ut".to_string(),
         cfg,
@@ -591,12 +709,17 @@ async fn symbol_sources_status_reports_state_and_error() {
 /// нет, поэтому проверяется сам факт попытки и внятность ответа, а не успех.
 #[tokio::test]
 async fn reconnect_symbol_source_reports_result() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
-    let mut cfg = bsl_context_server::config::SymbolSourceConfig::default();
-    cfg.kind = "code_index_mcp".to_string();
-    cfg.url = Some("http://127.0.0.1:1/mcp".to_string());
-    cfg.repo = Some("ut".to_string());
-    cfg.timeout_ms = 300;
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "code_index_mcp".to_string(),
+        url: Some("http://127.0.0.1:1/mcp".to_string()),
+        repo: Some("ut".to_string()),
+        timeout_ms: 300,
+        ..Default::default()
+    };
     let srv = srv.with_sources(vec![("ut".to_string(), cfg, Err("нет связи".to_string()))]);
 
     let json = srv
@@ -605,10 +728,16 @@ async fn reconnect_symbol_source_reports_result() {
         }))
         .await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["ok"], true, "ok:false только когда repo не настроен: {json}");
+    assert_eq!(
+        v["ok"], true,
+        "ok:false только когда repo не настроен: {json}"
+    );
     assert_eq!(v["repo"], "ut");
     assert_eq!(v["state"], "not_connected");
-    assert!(v["last_error"].is_string(), "причина обязана быть названа: {json}");
+    assert!(
+        v["last_error"].is_string(),
+        "причина обязана быть названа: {json}"
+    );
 
     // repo не настроен — вот это уже отказ инструмента.
     let json = srv
@@ -622,7 +751,10 @@ async fn reconnect_symbol_source_reports_result() {
 
 #[tokio::test]
 async fn validate_module_rejects_repo_when_no_sources_configured() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     // Сервер вообще без слотов (make_server их не настраивает), но клиент явно
     // просит repo — отказ должен называть причину, а не тихо съесть параметр.
     let json = srv
@@ -682,7 +814,10 @@ fn string_array(v: &serde_json::Value, key: &str) -> Vec<String> {
 /// Секция, дописанная в config.toml после старта, появляется в карте после перечитки.
 #[tokio::test]
 async fn reload_config_adds_section_written_after_start() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let dir = tempfile::TempDir::new().unwrap();
     write_config(dir.path(), &[("ut", "C:/no/such/ut_lite.db")]);
     let srv = srv.with_config_path(dir.path().join("config.toml"));
@@ -692,19 +827,33 @@ async fn reload_config_adds_section_written_after_start() {
     let json = srv.reload_config().await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], true, "ответ: {json}");
-    assert_eq!(string_array(&v, "added"), vec!["ut".to_string()], "ответ: {json}");
+    assert_eq!(
+        string_array(&v, "added"),
+        vec!["ut".to_string()],
+        "ответ: {json}"
+    );
     assert!(srv.slot("ut").is_some());
 
     // Секцию дописали уже на работающем сервере.
     write_config(
         dir.path(),
-        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+        &[
+            ("ut", "C:/no/such/ut_lite.db"),
+            ("bp", "C:/no/such/bp_lite.db"),
+        ],
     );
     let json = srv.reload_config().await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], true, "ответ: {json}");
-    assert_eq!(string_array(&v, "added"), vec!["bp".to_string()], "ответ: {json}");
-    assert!(srv.slot("bp").is_some(), "алиас должен быть в карте: {json}");
+    assert_eq!(
+        string_array(&v, "added"),
+        vec!["bp".to_string()],
+        "ответ: {json}"
+    );
+    assert!(
+        srv.slot("bp").is_some(),
+        "алиас должен быть в карте: {json}"
+    );
     assert!(srv.slot("ut").is_some());
 }
 
@@ -712,11 +861,17 @@ async fn reload_config_adds_section_written_after_start() {
 /// погас бы кэш и разорвалась сессия к code-index), изменённый — пересоздаётся.
 #[tokio::test]
 async fn reload_config_keeps_unchanged_slot_and_recreates_changed() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let dir = tempfile::TempDir::new().unwrap();
     write_config(
         dir.path(),
-        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+        &[
+            ("ut", "C:/no/such/ut_lite.db"),
+            ("bp", "C:/no/such/bp_lite.db"),
+        ],
     );
     let srv = srv.with_config_path(dir.path().join("config.toml"));
 
@@ -730,13 +885,24 @@ async fn reload_config_keeps_unchanged_slot_and_recreates_changed() {
     // «bp» правим, «ut» оставляем как был.
     write_config(
         dir.path(),
-        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite_v2.db")],
+        &[
+            ("ut", "C:/no/such/ut_lite.db"),
+            ("bp", "C:/no/such/bp_lite_v2.db"),
+        ],
     );
     let json = srv.reload_config().await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], true, "ответ: {json}");
-    assert_eq!(string_array(&v, "unchanged"), vec!["ut".to_string()], "ответ: {json}");
-    assert_eq!(string_array(&v, "recreated"), vec!["bp".to_string()], "ответ: {json}");
+    assert_eq!(
+        string_array(&v, "unchanged"),
+        vec!["ut".to_string()],
+        "ответ: {json}"
+    );
+    assert_eq!(
+        string_array(&v, "recreated"),
+        vec!["bp".to_string()],
+        "ответ: {json}"
+    );
     assert!(
         Arc::ptr_eq(&ut_before, &srv.slot("ut").unwrap()),
         "неизменившийся слот должен остаться тем же объектом"
@@ -750,11 +916,17 @@ async fn reload_config_keeps_unchanged_slot_and_recreates_changed() {
 /// Удалённая из файла секция уходит из карты.
 #[tokio::test]
 async fn reload_config_removes_deleted_section() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let dir = tempfile::TempDir::new().unwrap();
     write_config(
         dir.path(),
-        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+        &[
+            ("ut", "C:/no/such/ut_lite.db"),
+            ("bp", "C:/no/such/bp_lite.db"),
+        ],
     );
     let srv = srv.with_config_path(dir.path().join("config.toml"));
     let json = srv.reload_config().await;
@@ -766,8 +938,15 @@ async fn reload_config_removes_deleted_section() {
     let json = srv.reload_config().await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], true, "ответ: {json}");
-    assert_eq!(string_array(&v, "removed"), vec!["ut".to_string()], "ответ: {json}");
-    assert!(srv.slot("ut").is_none(), "удалённый алиас должен уйти из карты: {json}");
+    assert_eq!(
+        string_array(&v, "removed"),
+        vec!["ut".to_string()],
+        "ответ: {json}"
+    );
+    assert!(
+        srv.slot("ut").is_none(),
+        "удалённый алиас должен уйти из карты: {json}"
+    );
     assert!(srv.slot("bp").is_some());
 }
 
@@ -776,7 +955,10 @@ async fn reload_config_removes_deleted_section() {
 /// config.toml.
 #[tokio::test]
 async fn reconnect_symbol_source_picks_up_section_written_after_start() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let dir = tempfile::TempDir::new().unwrap();
     write_config(dir.path(), &[("ut", "C:/no/such/ut_lite.db")]);
     let srv = srv.with_config_path(dir.path().join("config.toml"));
@@ -784,7 +966,10 @@ async fn reconnect_symbol_source_picks_up_section_written_after_start() {
 
     write_config(
         dir.path(),
-        &[("ut", "C:/no/such/ut_lite.db"), ("bp", "C:/no/such/bp_lite.db")],
+        &[
+            ("ut", "C:/no/such/ut_lite.db"),
+            ("bp", "C:/no/such/bp_lite.db"),
+        ],
     );
     let json = srv
         .reconnect_symbol_source(Parameters(ReconnectSymbolSourceParams {
@@ -800,7 +985,10 @@ async fn reconnect_symbol_source_picks_up_section_written_after_start() {
 /// внятно, а не паникой.
 #[tokio::test]
 async fn reload_config_without_config_path_reports_refusal() {
-    let Some(srv) = make_server().await else { eprintln!("skip: hbk не найден"); return; };
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
     let json = srv.reload_config().await;
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["ok"], false, "ответ: {json}");

@@ -36,7 +36,8 @@ pub fn parse_constructor_page(html: &str) -> ConstructorInfo {
             "Пример:" => example = Some(parse_example(&ch.body_html)),
             "См. также:" => related = parse_related_objects(&ch.body_html),
             "Примечание:" => note = Some(parse_note(&ch.body_html)),
-            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" => {}
+            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" =>
+                {}
             _ => {}
         }
     }

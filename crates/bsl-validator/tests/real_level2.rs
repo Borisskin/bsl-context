@@ -12,8 +12,13 @@ use bsl_validator::{validate_expression_at_level, ExprErrorKind};
 use platform_index::load_from_hbk;
 
 fn hbk_path() -> Option<PathBuf> {
-    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH").ok().map(PathBuf::from)?;
-    let candidates = [root.join("shcntx_ru.hbk"), root.join("bin").join("shcntx_ru.hbk")];
+    let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH")
+        .ok()
+        .map(PathBuf::from)?;
+    let candidates = [
+        root.join("shcntx_ru.hbk"),
+        root.join("bin").join("shcntx_ru.hbk"),
+    ];
     candidates.into_iter().find(|p| p.exists())
 }
 
@@ -37,7 +42,10 @@ fn level1_misses_local_var_typo_level2_catches() {
     let r1 = validate_expression_at_level(&index, src, 1);
     println!("--- level=1 ---\n{r1:#?}");
     // На Уровне 1 'МойЗапрос' слева — переменная, не тип, проверка скипается.
-    assert!(r1.valid, "level 1 не должен ловить опечатки в локальных переменных");
+    assert!(
+        r1.valid,
+        "level 1 не должен ловить опечатки в локальных переменных"
+    );
 
     let r2 = validate_expression_at_level(&index, src, 2);
     println!("--- level=2 ---\n{r2:#?}");

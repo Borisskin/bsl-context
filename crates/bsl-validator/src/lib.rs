@@ -21,8 +21,8 @@ pub mod ast {
     pub use bsl_parse::normalize_for_parser;
 }
 pub use check::{
-    validate_enum, validate_method_call, EnumValidation, MethodCallValidation, SimilarValue,
-    SignatureBrief,
+    validate_enum, validate_method_call, EnumValidation, MethodCallValidation, SignatureBrief,
+    SimilarValue,
 };
 pub use context_names::{is_form_module, FORM_TYPE};
 pub use expression::{

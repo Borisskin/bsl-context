@@ -57,7 +57,10 @@ fn hbk_path() -> Option<PathBuf> {
     let root = std::env::var("BSL_CONTEXT_PLATFORM_PATH")
         .ok()
         .map(PathBuf::from)?;
-    let candidates = [root.join("shcntx_ru.hbk"), root.join("bin").join("shcntx_ru.hbk")];
+    let candidates = [
+        root.join("shcntx_ru.hbk"),
+        root.join("bin").join("shcntx_ru.hbk"),
+    ];
     candidates.into_iter().find(|p| p.exists())
 }
 
@@ -142,7 +145,10 @@ fn config_objects_on_real_ut_corpus() {
                 continue;
             }
             *by_kind.entry(format!("{:?}", err.kind)).or_default() += 1;
-            findings.push(format!("{rel}:{} {:?} — {}", err.line, err.kind, err.message));
+            findings.push(format!(
+                "{rel}:{} {:?} — {}",
+                err.line, err.kind, err.message
+            ));
         }
     }
 

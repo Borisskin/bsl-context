@@ -5,6 +5,24 @@
 Формат: [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование: [SemVer](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Безопасность
+
+- Обновлены зависимости с исправлениями RustSec: `anyhow`, `crossbeam-epoch`,
+  `quick-xml` и `rustls`; старый неподдерживаемый `fxhash` исключён обновлением
+  HTML-парсера. Добавлена воспроизводимая политика `cargo-deny` для advisory,
+  лицензий, источников и wildcard-зависимостей.
+
+### Изменено
+
+- Весь Rust workspace приведён к единому `rustfmt` и проходит строгий Clippy для
+  всех targets/features без глобальных подавлений предупреждений.
+- Добавлен обычный CI для push/PR: форматирование, Clippy, doctest,
+  `cargo-deny`, `cargo-nextest` на Windows/Linux и release-сборка на обеих ОС.
+- Добавлена сквозная Streamable HTTP acceptance-проверка: рукопожатие,
+  `tools/list` и вызов всех 14 MCP-инструментов через настоящий HTTP-router.
+
 ## [0.19.0] — 2026-09-18
 
 ### Добавлено

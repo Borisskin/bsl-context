@@ -535,7 +535,10 @@ impl Parser {
                     current.has_top_level_or = true;
                 }
             }
-            let next_is_dot = self.tokens.get(self.pos + 1).is_some_and(|t| t.is_punct('.'));
+            let next_is_dot = self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.is_punct('.'));
             collect_field(
                 &token,
                 next_is_dot,
@@ -615,7 +618,10 @@ impl Parser {
                     condition.has_top_level_or = true;
                 }
             }
-            let next_is_dot = self.tokens.get(self.pos + 1).is_some_and(|t| t.is_punct('.'));
+            let next_is_dot = self
+                .tokens
+                .get(self.pos + 1)
+                .is_some_and(|t| t.is_punct('.'));
             collect_field(
                 &token,
                 next_is_dot,
@@ -646,8 +652,7 @@ fn collect_field(
 ) {
     // Ключевое слово рядом с точкой — это имя: `В.Ссылка`, `Т.В`. Само по себе
     // (`И`, `ИЛИ` между условиями) — оператор, и полем считаться не должно.
-    let is_name = token.kind == Kind::Ident
-        || (is_name_like(token) && (*after_dot || next_is_dot));
+    let is_name = token.kind == Kind::Ident || (is_name_like(token) && (*after_dot || next_is_dot));
     if is_name {
         if !path.is_empty() && !*after_dot {
             flush_path(path, *path_offset, condition);

@@ -203,10 +203,7 @@ fn is_bound_locally(
     module_vars: &HashSet<&str>,
     name_lower: &str,
 ) -> bool {
-    if module_vars
-        .iter()
-        .any(|n| n.to_lowercase() == name_lower)
-    {
+    if module_vars.iter().any(|n| n.to_lowercase() == name_lower) {
         return true;
     }
     let Some(scope) = scope else {
@@ -215,9 +212,10 @@ fn is_bound_locally(
     if scope.params.contains(name_lower) {
         return true;
     }
-    facts.assigns.iter().any(|a| {
-        a.declaration && scope.contains(a.byte) && a.name.to_lowercase() == name_lower
-    })
+    facts
+        .assigns
+        .iter()
+        .any(|a| a.declaration && scope.contains(a.byte) && a.name.to_lowercase() == name_lower)
 }
 
 /// Собрать сообщение по виду присваивания/объявления и добавить находку.
@@ -438,7 +436,10 @@ mod tests {
 
     #[test]
     fn global_readonly_property_assignment_is_high_in_any_module() {
-        let errors = shadowed("Процедура Т()\nДокументы = Новый Массив;\nКонецПроцедуры\n", false);
+        let errors = shadowed(
+            "Процедура Т()\nДокументы = Новый Массив;\nКонецПроцедуры\n",
+            false,
+        );
         assert_eq!(errors.len(), 1, "{:?}", errors);
         assert_eq!(errors[0].confidence, Confidence::High);
     }
@@ -508,6 +509,10 @@ mod tests {
             true,
         );
         assert_eq!(errors.len(), 1, "{:?}", errors);
-        assert!(errors[0].message.contains("Перем"), "{:?}", errors[0].message);
+        assert!(
+            errors[0].message.contains("Перем"),
+            "{:?}",
+            errors[0].message
+        );
     }
 }

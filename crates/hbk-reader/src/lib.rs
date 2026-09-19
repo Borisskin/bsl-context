@@ -17,5 +17,7 @@ pub mod toc;
 pub use container::HbkContainer;
 pub use content::HbkContent;
 pub use error::{HbkError, Result};
-pub use models::{Chunk, DoubleLanguageString, NameContainer, NameObject, Page, PropertiesContainer, Toc};
+pub use models::{
+    Chunk, DoubleLanguageString, NameContainer, NameObject, Page, PropertiesContainer, Toc,
+};
 pub use toc::parse_toc;

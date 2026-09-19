@@ -26,7 +26,8 @@ pub fn parse_enum_value_page(html: &str) -> EnumValueInfo {
             "Описание:" => description = parse_description(&ch.body_html),
             "См. также:" => related = parse_related_objects(&ch.body_html),
             // Эти главы есть в апстриме, но мы их игнорируем как и он.
-            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" => {}
+            "Доступность:" | "Использование в версии:" | "Использование в интерфейсе:" =>
+                {}
             _ => {}
         }
     }

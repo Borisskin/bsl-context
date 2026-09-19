@@ -144,7 +144,11 @@ fn real_platform_failures_are_caught() {
             caught += 1;
         }
 
-        let mark = if got { "ЛОВИТ  " } else { "ПРОПУСК" };
+        let mark = if got {
+            "ЛОВИТ  "
+        } else {
+            "ПРОПУСК"
+        };
         println!("{mark} {title}");
         for err in result.errors.iter().take(2) {
             println!(
@@ -163,5 +167,8 @@ fn real_platform_failures_are_caught() {
         regressions.is_empty(),
         "перестали ловиться реальные отказы: {regressions:?}"
     );
-    assert_eq!(expected, 9, "состав ожиданий изменился — обновите комментарий");
+    assert_eq!(
+        expected, 9,
+        "состав ожиданий изменился — обновите комментарий"
+    );
 }

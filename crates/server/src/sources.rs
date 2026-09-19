@@ -42,12 +42,7 @@ pub fn build_symbol_source(
             }
             symbol_source::LiteSource::open(path)
                 .map(|src| Some(Arc::new(src) as Arc<dyn SymbolSource>))
-                .map_err(|e| {
-                    format!(
-                        "не удалось открыть lite-индекс {}: {e}",
-                        path.display()
-                    )
-                })
+                .map_err(|e| format!("не удалось открыть lite-индекс {}: {e}", path.display()))
         }
         "code_index_db" => {
             let path = cfg.db_path.as_deref().ok_or_else(|| {
@@ -55,12 +50,7 @@ pub fn build_symbol_source(
             })?;
             symbol_source::CodeIndexDbSource::open(path)
                 .map(|src| Some(Arc::new(src) as Arc<dyn SymbolSource>))
-                .map_err(|e| {
-                    format!(
-                        "не удалось открыть базу code-index {}: {e}",
-                        path.display()
-                    )
-                })
+                .map_err(|e| format!("не удалось открыть базу code-index {}: {e}", path.display()))
         }
         "code_index_mcp" => {
             let url = cfg.url.clone().ok_or_else(|| {
@@ -76,7 +66,9 @@ pub fn build_symbol_source(
             symbol_source::CodeIndexMcpSource::new(url.clone(), repo.clone(), cfg.timeout_ms)
                 .map(|src| Some(Arc::new(src) as Arc<dyn SymbolSource>))
                 .map_err(|e| {
-                    format!("не удалось подключить MCP-источник code-index {url} (repo={repo}): {e}")
+                    format!(
+                        "не удалось подключить MCP-источник code-index {url} (repo={repo}): {e}"
+                    )
                 })
         }
         other => Err(format!(

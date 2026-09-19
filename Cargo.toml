@@ -55,8 +55,8 @@ zip = "2"
 encoding_rs = "0.8"
 
 # HTML-парсинг (Phase 2)
-scraper = "0.21"
-ego-tree = "0.9"
+scraper = "0.27"
+ego-tree = "0.11"
 
 # Регулярные выражения / glob
 regex = "1"

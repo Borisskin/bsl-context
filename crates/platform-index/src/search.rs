@@ -223,29 +223,24 @@ impl SearchEngine {
         // 3. Substring — последний резерв (если префикс ничего не дал).
         if out.is_empty() {
             for ty in self.types_hash.inner.values() {
-                if ty.name_ru.to_lowercase().contains(&q)
-                    || ty.name_en.to_lowercase().contains(&q)
+                if ty.name_ru.to_lowercase().contains(&q) || ty.name_en.to_lowercase().contains(&q)
                 {
                     push_unique(&mut out, &mut seen, Definition::Type(ty.clone()));
                 }
             }
             for m in self.methods_hash.inner.values() {
-                if m.name_ru.to_lowercase().contains(&q)
-                    || m.name_en.to_lowercase().contains(&q)
-                {
+                if m.name_ru.to_lowercase().contains(&q) || m.name_en.to_lowercase().contains(&q) {
                     push_unique(&mut out, &mut seen, Definition::Method(m.clone()));
                 }
             }
             for p in self.properties_hash.inner.values() {
-                if p.name_ru.to_lowercase().contains(&q)
-                    || p.name_en.to_lowercase().contains(&q)
-                {
+                if p.name_ru.to_lowercase().contains(&q) || p.name_en.to_lowercase().contains(&q) {
                     push_unique(&mut out, &mut seen, Definition::Property(p.clone()));
                 }
             }
         }
 
-        out.truncate(limit.max(1).min(50));
+        out.truncate(limit.clamp(1, 50));
         out
     }
 }

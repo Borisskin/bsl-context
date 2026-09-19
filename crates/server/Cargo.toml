@@ -10,10 +10,10 @@ name = "bsl-context-rs"
 path = "src/main.rs"
 
 [dependencies]
-platform-index = { path = "../platform-index" }
-bsl-validator  = { path = "../bsl-validator" }
-symbol-source  = { path = "../symbol-source" }
-lite-index     = { path = "../lite-index" }
+platform-index = { path = "../platform-index", version = "0.19.0" }
+bsl-validator  = { path = "../bsl-validator", version = "0.19.0" }
+symbol-source  = { path = "../symbol-source", version = "0.19.0" }
+lite-index     = { path = "../lite-index", version = "0.19.0" }
 
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -44,3 +44,5 @@ winresource = { version = "0.1.31", default-features = false }
 walkdir = { workspace = true }
 # Изолированный каталог под PID-файл в тестах замка.
 tempfile = "3"
+# HTTP-клиент для сквозной проверки MCP-протокола через настоящий axum router.
+ureq = { version = "2", features = ["json"] }

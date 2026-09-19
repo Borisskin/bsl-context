@@ -23,10 +23,7 @@ fn split_dual_name(text: &str) -> (String, String) {
                     // (`Windows_x86`, `Version8_2`); без него такие значения
                     // оставались с синонимом в скобках прямо в `name_ru`.
                     if en.chars().all(|c| {
-                        c.is_ascii_alphanumeric()
-                            || c.is_ascii_whitespace()
-                            || c == '.'
-                            || c == '_'
+                        c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || c == '.' || c == '_'
                     }) {
                         return (ru, en);
                     }
@@ -143,7 +140,7 @@ pub fn parse_value_info(body_html: &str) -> Option<ValueInfo> {
         // иногда «Тип:» идёт после whitespace или с дефисом
         md.find("Тип:").map(|idx| &md[idx + "Тип:".len()..])
     });
-    let Some(rest) = after_marker else { return None };
+    let rest = after_marker?;
     let rest = rest.trim_start();
     if rest.is_empty() {
         return None;
@@ -182,8 +179,7 @@ pub fn parse_parameters(body_html: &str) -> Vec<MethodParameterInfo> {
     // для каждого rubric извлекаем имя и optional, тип/описание берём из текста
     // до следующего rubric (в простом случае).
     let doc = Html::parse_fragment(body_html);
-    let rubric_sel =
-        Selector::parse("div.V8SH_rubric").expect("V8SH_rubric selector");
+    let rubric_sel = Selector::parse("div.V8SH_rubric").expect("V8SH_rubric selector");
 
     let mut params = Vec::new();
     for rubric in doc.select(&rubric_sel) {
@@ -209,14 +205,12 @@ pub fn parse_parameters(body_html: &str) -> Vec<MethodParameterInfo> {
 fn parse_parameter_header(text: &str) -> (String, bool) {
     // Шаблон: возможны кавычки/скобки. PARAMETER_NAME_PATTERN = `<([^&]+)>\s*(?:\(([^)]+)\))?`
     let trimmed = text.trim();
-    let stripped = trimmed.strip_prefix('<').and_then(|s| s.find('>').map(|i| &s[..i]));
+    let stripped = trimmed
+        .strip_prefix('<')
+        .and_then(|s| s.find('>').map(|i| &s[..i]));
     if let Some(inner) = stripped {
         let name = inner.trim().to_string();
-        let after = trimmed
-            .splitn(2, '>')
-            .nth(1)
-            .unwrap_or("")
-            .trim();
+        let after = trimmed.split_once('>').map(|x| x.1).unwrap_or("").trim();
         let is_optional = after.contains("необязательный");
         (name, is_optional)
     } else {

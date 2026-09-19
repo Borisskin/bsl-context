@@ -22,9 +22,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let command = args
-        .next()
-        .context("укажите команду: build | stats")?;
+    let command = args.next().context("укажите команду: build | stats")?;
 
     match command.as_str() {
         "build" => run_build(args),
@@ -46,11 +44,7 @@ fn run_build(args: impl Iterator<Item = String>) -> Result<()> {
                     args.next().context("--root требует значение")?,
                 ))
             }
-            "--db" => {
-                db = Some(PathBuf::from(
-                    args.next().context("--db требует значение")?,
-                ))
-            }
+            "--db" => db = Some(PathBuf::from(args.next().context("--db требует значение")?)),
             "--jobs" => {
                 jobs = args
                     .next()
@@ -80,11 +74,7 @@ fn run_stats(args: impl Iterator<Item = String>) -> Result<()> {
     let mut args = args;
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--db" => {
-                db = Some(PathBuf::from(
-                    args.next().context("--db требует значение")?,
-                ))
-            }
+            "--db" => db = Some(PathBuf::from(args.next().context("--db требует значение")?)),
             other => bail!("неизвестный флаг '{other}'"),
         }
     }

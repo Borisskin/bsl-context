@@ -81,7 +81,7 @@ impl Token {
     }
 
     pub fn is_punct(&self, c: char) -> bool {
-        self.kind == Kind::Punct && self.text.chars().next() == Some(c)
+        self.kind == Kind::Punct && self.text.starts_with(c)
     }
 }
 
@@ -206,7 +206,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
             let start = i;
             i += 1;
             while i < bytes.len() {
-                let Some(ch) = src[i..].chars().next() else { break };
+                let Some(ch) = src[i..].chars().next() else {
+                    break;
+                };
                 if !is_ident_char(ch) {
                     break;
                 }
@@ -223,7 +225,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         if c.is_ascii_digit() {
             let start = i;
             while i < bytes.len() {
-                let Some(ch) = src[i..].chars().next() else { break };
+                let Some(ch) = src[i..].chars().next() else {
+                    break;
+                };
                 if !ch.is_ascii_digit() && ch != '.' {
                     break;
                 }
@@ -240,7 +244,9 @@ pub fn tokenize(src: &str) -> Vec<Token> {
         if is_ident_char(c) {
             let start = i;
             while i < bytes.len() {
-                let Some(ch) = src[i..].chars().next() else { break };
+                let Some(ch) = src[i..].chars().next() else {
+                    break;
+                };
                 if !is_ident_char(ch) {
                     break;
                 }
@@ -344,7 +350,8 @@ mod tests {
         let src = "ВЫБРАТЬ Товар ИЗ Справочник.Товары";
         for token in tokenize(src) {
             assert!(
-                src[token.offset..].starts_with(&token.text) || token.kind == Kind::Keyword(Kw::GroupBy),
+                src[token.offset..].starts_with(&token.text)
+                    || token.kind == Kind::Keyword(Kw::GroupBy),
                 "лексема {:?} не на своём месте",
                 token
             );
@@ -354,7 +361,9 @@ mod tests {
     #[test]
     fn params_and_strings_are_whole() {
         let tokens = tokenize("ГДЕ Дата >= &НачалоПериода И Имя = \"Иванов\"");
-        assert!(tokens.iter().any(|t| t.kind == Kind::Param && t.text == "&НачалоПериода"));
+        assert!(tokens
+            .iter()
+            .any(|t| t.kind == Kind::Param && t.text == "&НачалоПериода"));
         assert!(tokens.iter().any(|t| t.kind == Kind::Str));
     }
 

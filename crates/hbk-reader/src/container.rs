@@ -132,7 +132,7 @@ fn read_file_name(buffer: &[u8], header_address: usize) -> Result<String> {
 
 /// Декодировать UTF-16LE-строку (имя файла в hbk-контейнере).
 fn decode_utf16le(raw: &[u8]) -> Result<String> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Err(HbkError::BadFormat(format!(
             "UTF-16LE буфер нечётной длины: {}",
             raw.len()
@@ -154,7 +154,8 @@ fn read_long_string(buffer: &[u8], pos: &mut usize) -> Result<i32> {
     *pos += 8;
     // отдельный байт-разделитель (часто пробел или '\n')
     skip(pos, 1);
-    let s = std::str::from_utf8(raw).map_err(|e| HbkError::BadFormat(format!("long-string: {e}")))?;
+    let s =
+        std::str::from_utf8(raw).map_err(|e| HbkError::BadFormat(format!("long-string: {e}")))?;
     let v = i64::from_str_radix(s.trim(), 16)
         .map_err(|e| HbkError::BadFormat(format!("long-string не hex '{s}': {e}")))?;
     Ok(v as i32)

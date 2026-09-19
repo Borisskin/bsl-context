@@ -91,7 +91,10 @@ const REGISTER_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 #[test]
 fn document_attributes_and_indexing() {
     let (register_type, fields) = parse(DOCUMENT_XML);
-    assert_eq!(register_type, None, "у документа вида регистра быть не должно");
+    assert_eq!(
+        register_type, None,
+        "у документа вида регистра быть не должно"
+    );
 
     let names: Vec<&str> = fields.iter().map(|(n, ..)| n.as_str()).collect();
     assert!(names.contains(&"Контрагент"), "{names:?}");

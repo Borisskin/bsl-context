@@ -56,7 +56,6 @@ impl SymbolSource for StubSource {
                 dimensions: vec![field("Номенклатура", false), field("Склад", false)],
                 resources: vec![field("ВНаличии", false)],
                 register_type: Some("Balance".to_string()),
-                ..Default::default()
             }),
             ("AccumulationRegisters", "продажи") => Some(ObjectSchema {
                 dimensions: vec![field("Номенклатура", false)],
@@ -117,7 +116,11 @@ fn temp_table_joined_without_index_is_reported() {
          ;ВЫБРАТЬ 1 ИЗ Справочник.Цены КАК Ц \
          ЛЕВОЕ СОЕДИНЕНИЕ ВТТовары КАК В ПО В.Ссылка = Ц.Товар",
     );
-    assert!(has(&src, ExprErrorKind::TempTableWithoutIndex), "{:?}", kinds(&src));
+    assert!(
+        has(&src, ExprErrorKind::TempTableWithoutIndex),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
@@ -128,7 +131,11 @@ fn indexed_temp_table_is_silent() {
          ;ВЫБРАТЬ 1 ИЗ Справочник.Цены КАК Ц \
          ЛЕВОЕ СОЕДИНЕНИЕ ВТТовары КАК В ПО В.Ссылка = Ц.Товар",
     );
-    assert!(!has(&src, ExprErrorKind::TempTableWithoutIndex), "{:?}", kinds(&src));
+    assert!(
+        !has(&src, ExprErrorKind::TempTableWithoutIndex),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
@@ -138,7 +145,11 @@ fn temp_table_without_join_needs_no_index() {
         "ВЫБРАТЬ Т.Ссылка КАК Ссылка ПОМЕСТИТЬ ВТТовары ИЗ Справочник.Товары КАК Т \
          ;ВЫБРАТЬ В.Ссылка ИЗ ВТТовары КАК В",
     );
-    assert!(!has(&src, ExprErrorKind::TempTableWithoutIndex), "{:?}", kinds(&src));
+    assert!(
+        !has(&src, ExprErrorKind::TempTableWithoutIndex),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
@@ -146,7 +157,11 @@ fn temp_table_created_in_another_query_text_is_silent() {
     // Создание и соединение разнесены по разным текстам: связи не видно,
     // утверждать нечего.
     let src = module_with("ВЫБРАТЬ Т.Ссылка ПОМЕСТИТЬ ВТТовары ИЗ Справочник.Товары КАК Т");
-    assert!(!has(&src, ExprErrorKind::TempTableWithoutIndex), "{:?}", kinds(&src));
+    assert!(
+        !has(&src, ExprErrorKind::TempTableWithoutIndex),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
@@ -156,7 +171,11 @@ fn index_by_sets_counts_as_index() {
          ИНДЕКСИРОВАТЬ ПО НАБОРАМ ((А, Б), (Б)) \
          ;ВЫБРАТЬ 1 ИЗ Справочник.Цены КАК Ц ЛЕВОЕ СОЕДИНЕНИЕ ВТ КАК В ПО В.А = Ц.Товар",
     );
-    assert!(!has(&src, ExprErrorKind::TempTableWithoutIndex), "{:?}", kinds(&src));
+    assert!(
+        !has(&src, ExprErrorKind::TempTableWithoutIndex),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 // ── ИЛИ в условии соединения ──────────────────────────────────────────────
@@ -167,7 +186,11 @@ fn or_in_join_condition_is_reported() {
         "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т \
          ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Склады КАК С ПО Т.Склад = С.Ссылка ИЛИ Т.Склад ЕСТЬ NULL",
     );
-    assert!(has(&src, ExprErrorKind::OrInJoinCondition), "{:?}", kinds(&src));
+    assert!(
+        has(&src, ExprErrorKind::OrInJoinCondition),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
@@ -179,16 +202,23 @@ fn or_inside_parentheses_is_not_reported() {
          ВНУТРЕННЕЕ СОЕДИНЕНИЕ Справочник.Склады КАК С \
          ПО Т.Склад = С.Ссылка И (Т.Цена > 0 ИЛИ Т.Остаток > 0)",
     );
-    assert!(!has(&src, ExprErrorKind::OrInJoinCondition), "{:?}", kinds(&src));
+    assert!(
+        !has(&src, ExprErrorKind::OrInJoinCondition),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
 fn or_in_where_is_not_a_join_finding() {
     // `ИЛИ` в отборе — обычное дело, правило про условие соединения.
-    let src = module_with(
-        "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т ГДЕ Т.Цена > 0 ИЛИ Т.Цена ЕСТЬ NULL",
+    let src =
+        module_with("ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т ГДЕ Т.Цена > 0 ИЛИ Т.Цена ЕСТЬ NULL");
+    assert!(
+        !has(&src, ExprErrorKind::OrInJoinCondition),
+        "{:?}",
+        kinds(&src)
     );
-    assert!(!has(&src, ExprErrorKind::OrInJoinCondition), "{:?}", kinds(&src));
 }
 
 // ── Соединение с подзапросом ──────────────────────────────────────────────
@@ -200,7 +230,11 @@ fn join_with_subquery_is_reported() {
          ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Ц.Товар КАК Товар ИЗ Справочник.Цены КАК Ц) КАК П \
          ПО П.Товар = Т.Ссылка",
     );
-    assert!(has(&src, ExprErrorKind::JoinWithSubquery), "{:?}", kinds(&src));
+    assert!(
+        has(&src, ExprErrorKind::JoinWithSubquery),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 #[test]
@@ -209,7 +243,11 @@ fn subquery_in_where_is_not_a_join() {
         "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т \
          ГДЕ Т.Ссылка В (ВЫБРАТЬ Ц.Товар ИЗ Справочник.Цены КАК Ц)",
     );
-    assert!(!has(&src, ExprErrorKind::JoinWithSubquery), "{:?}", kinds(&src));
+    assert!(
+        !has(&src, ExprErrorKind::JoinWithSubquery),
+        "{:?}",
+        kinds(&src)
+    );
 }
 
 // ── Молчание там, где сказать нечего ──────────────────────────────────────
@@ -244,7 +282,10 @@ fn dynamic_query_text_is_skipped() {
     // Часть текста вычисляется — запрос не разбирается вовсе.
     let src = "Процедура П()\n\tЗапрос.Текст = \"ВЫБРАТЬ 1 ИЗ \" + ИмяТаблицы + \" КАК Т\";\nКонецПроцедуры\n";
     let found = kinds(src);
-    assert!(!found.contains(&ExprErrorKind::TempTableWithoutIndex), "{found:?}");
+    assert!(
+        !found.contains(&ExprErrorKind::TempTableWithoutIndex),
+        "{found:?}"
+    );
 }
 
 // ── Правила, которым нужен состав объекта ─────────────────────────────────
@@ -253,7 +294,11 @@ fn dynamic_query_text_is_skipped() {
 fn physical_balance_register_table_is_reported() {
     let src = module_with("ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах КАК Р");
     assert!(
-        has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable),
+        has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::PhysicalRegisterTable
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -267,7 +312,11 @@ fn movement_fields_make_physical_table_legitimate() {
          ИЗ РегистрНакопления.ТоварыНаСкладах КАК Движения",
     );
     assert!(
-        !has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable),
+        !has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::PhysicalRegisterTable
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -281,7 +330,11 @@ fn virtual_table_filter_passed_as_parameter_is_silent() {
         "ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки(, &ОтборПоИзмерениям) КАК Т",
     );
     assert!(
-        !has_with(&src, &StubSource::new(), ExprErrorKind::VirtualTableWithoutFilter),
+        !has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::VirtualTableWithoutFilter
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -295,7 +348,11 @@ fn movement_fields_without_alias_also_count() {
          ГДЕ Активность И Регистратор В (&Регистратор)",
     );
     assert!(
-        !has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable),
+        !has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::PhysicalRegisterTable
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -305,11 +362,14 @@ fn movement_fields_without_alias_also_count() {
 fn register_attribute_makes_physical_table_legitimate() {
     // Реквизиты регистра доступны только в движениях — виртуальная таблица их
     // не отдаёт, и советовать её нельзя.
-    let src = module_with(
-        "ВЫБРАТЬ Т.Номенклатура, Т.Сторно ИЗ РегистрНакопления.ТоварыНаСкладах КАК Т",
-    );
+    let src =
+        module_with("ВЫБРАТЬ Т.Номенклатура, Т.Сторно ИЗ РегистрНакопления.ТоварыНаСкладах КАК Т");
     assert!(
-        !has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable),
+        !has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::PhysicalRegisterTable
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -324,7 +384,11 @@ fn physical_read_by_dimensions_only_is_still_reported() {
          ГДЕ Т.Склад = &Склад",
     );
     assert!(
-        has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable),
+        has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::PhysicalRegisterTable
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -338,7 +402,11 @@ fn periodicity_argument_is_not_a_filter() {
         "ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах.ОстаткиИОбороты(&Нач, , МЕСЯЦ, Движения, ) КАК Т",
     );
     assert!(
-        has_with(&src, &StubSource::new(), ExprErrorKind::VirtualTableWithoutFilter),
+        has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::VirtualTableWithoutFilter
+        ),
         "отбор пуст, находка обязана быть: {:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -349,14 +417,22 @@ fn balance_and_turnovers_with_filter_is_silent() {
     let src = module_with(
         "ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах.ОстаткиИОбороты(&Нач, &Кон, МЕСЯЦ, Движения, Склад = &Склад) КАК Т",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::VirtualTableWithoutFilter));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::VirtualTableWithoutFilter
+    ));
 }
 
 #[test]
 fn turnovers_register_has_no_balance_table() {
     // У регистра оборотов таблицы остатков не существует — советовать нечего.
     let src = module_with("ВЫБРАТЬ 1 ИЗ РегистрНакопления.Продажи КАК Р");
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::PhysicalRegisterTable
+    ));
 }
 
 #[test]
@@ -364,21 +440,33 @@ fn virtual_table_is_not_a_physical_read() {
     let src = module_with(
         "ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки(&Дата, Склад = &Склад) КАК Ост",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::PhysicalRegisterTable));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::PhysicalRegisterTable
+    ));
 }
 
 #[test]
 fn silent_source_means_silence_not_findings() {
     // Главный контракт слоя: «состава не знаю» → правило молчит целиком.
     let src = module_with("ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах КАК Р");
-    assert!(!has_with(&src, &StubSource::silent(), ExprErrorKind::PhysicalRegisterTable));
+    assert!(!has_with(
+        &src,
+        &StubSource::silent(),
+        ExprErrorKind::PhysicalRegisterTable
+    ));
 }
 
 #[test]
 fn virtual_table_without_filter_is_reported() {
     let src = module_with("ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки() КАК Ост");
     assert!(
-        has_with(&src, &StubSource::new(), ExprErrorKind::VirtualTableWithoutFilter),
+        has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::VirtualTableWithoutFilter
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -389,7 +477,11 @@ fn virtual_table_with_dimension_filter_is_silent() {
     let src = module_with(
         "ВЫБРАТЬ 1 ИЗ РегистрНакопления.ТоварыНаСкладах.Остатки(&Дата, Склад = &Склад) КАК Ост",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::VirtualTableWithoutFilter));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::VirtualTableWithoutFilter
+    ));
 }
 
 #[test]
@@ -399,7 +491,11 @@ fn join_on_unindexed_field_is_reported() {
          ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Товары КАК Д ПО Т.Комментарий = Д.Комментарий",
     );
     assert!(
-        has_with(&src, &StubSource::new(), ExprErrorKind::JoinOnUnindexedField),
+        has_with(
+            &src,
+            &StubSource::new(),
+            ExprErrorKind::JoinOnUnindexedField
+        ),
         "{:?}",
         kinds_with(&src, &StubSource::new())
     );
@@ -414,7 +510,11 @@ fn unindexed_field_on_the_other_side_is_fine() {
         "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т \
          ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Товары КАК Д ПО Т.Комментарий = Д.Ссылка",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::JoinOnUnindexedField));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::JoinOnUnindexedField
+    ));
 }
 
 #[test]
@@ -426,7 +526,11 @@ fn join_with_register_is_left_to_the_register_rule() {
          ЛЕВОЕ СОЕДИНЕНИЕ РегистрНакопления.ТоварыНаСкладах.Остатки(&Дата, Склад = &Склад) КАК О \
          ПО О.Номенклатура = Т.Сделка",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::JoinOnUnindexedField));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::JoinOnUnindexedField
+    ));
 }
 
 #[test]
@@ -435,7 +539,11 @@ fn join_on_indexed_field_is_silent() {
         "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т \
          ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Товары КАК Д ПО Т.Сделка = Д.Сделка",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::JoinOnUnindexedField));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::JoinOnUnindexedField
+    ));
 }
 
 #[test]
@@ -445,7 +553,11 @@ fn join_on_standard_field_is_silent() {
         "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т \
          ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Товары КАК Д ПО Т.Ссылка = Д.Ссылка",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::JoinOnUnindexedField));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::JoinOnUnindexedField
+    ));
 }
 
 #[test]
@@ -456,7 +568,11 @@ fn join_on_unknown_field_is_silent() {
         "ВЫБРАТЬ 1 ИЗ Справочник.Товары КАК Т \
          ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Товары КАК Д ПО Т.НеизвестноеПоле = Д.НеизвестноеПоле",
     );
-    assert!(!has_with(&src, &StubSource::new(), ExprErrorKind::JoinOnUnindexedField));
+    assert!(!has_with(
+        &src,
+        &StubSource::new(),
+        ExprErrorKind::JoinOnUnindexedField
+    ));
 }
 
 #[test]
@@ -482,5 +598,8 @@ fn finding_points_at_the_line_inside_module() {
         .find(|e| e.kind == ExprErrorKind::OrInJoinCondition)
         .expect("находка потеряна");
     // Соединение записано на третьей строке модуля.
-    assert_eq!(finding.line, 3, "находка встала не на ту строку: {finding:?}");
+    assert_eq!(
+        finding.line, 3,
+        "находка встала не на ту строку: {finding:?}"
+    );
 }

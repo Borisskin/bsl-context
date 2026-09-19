@@ -80,10 +80,10 @@ fn platform_typo_in_module_flagged() {
     assert_eq!(err.confidence, Confidence::High);
     // На «МояПроцедура» ошибки НЕТ.
     assert!(
-        !result.errors.iter().any(|e| e
-            .message
-            .to_lowercase()
-            .contains("мояпроцедура")),
+        !result
+            .errors
+            .iter()
+            .any(|e| e.message.to_lowercase().contains("мояпроцедура")),
         "своя процедура не должна попадать в ошибки: {:#?}",
         result.errors
     );

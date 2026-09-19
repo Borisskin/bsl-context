@@ -52,9 +52,7 @@ impl HbkContent {
     /// мы делаем то же самое.
     pub fn get_entry(&mut self, html_path: &str) -> Result<Vec<u8>> {
         if html_path.is_empty() {
-            return Err(HbkError::HtmlEntryNotFound(
-                "пустое имя файла".to_string(),
-            ));
+            return Err(HbkError::HtmlEntryNotFound("пустое имя файла".to_string()));
         }
         let name = html_path.strip_prefix('/').unwrap_or(html_path);
         let mut entry = self

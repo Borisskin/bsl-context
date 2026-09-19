@@ -37,10 +37,7 @@ fn opens_real_hbk_and_returns_nonempty_toc() {
     let content = HbkContent::read(&path).expect("HbkContent::read должен открыть hbk");
     let pages = &content.toc.pages;
 
-    assert!(
-        !pages.is_empty(),
-        "TOC пустой — что-то не так с парсером"
-    );
+    assert!(!pages.is_empty(), "TOC пустой — что-то не так с парсером");
 
     // Первые 5 страниц для глаз — печать в --nocapture
     for (i, p) in pages.iter().take(5).enumerate() {
@@ -71,7 +68,7 @@ fn reads_first_html_page() {
     let mut content = HbkContent::read(&path).expect("hbk open");
 
     // Найти первую страницу с непустым htmlPath (рекурсивно).
-    fn find_html<'a>(pages: &'a [hbk_reader::Page]) -> Option<&'a str> {
+    fn find_html(pages: &[hbk_reader::Page]) -> Option<&str> {
         for p in pages {
             if !p.html_path.is_empty() {
                 return Some(&p.html_path);
