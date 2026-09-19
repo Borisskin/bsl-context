@@ -5,7 +5,7 @@
 Формат: [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
 версионирование: [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [0.19.1] — 2026-09-19
 
 ### Безопасность
 
