@@ -25,9 +25,12 @@ use rayon::prelude::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use walkdir::WalkDir;
 
-/// Схема облегчённого индекса. Индексы создаются сразу — база одноразовая,
-/// пересобирается целиком на каждый `build`, поэтому цену вставки под уже
-/// созданными индексами закладываем сознательно.
+/// Схема облегчённого индекса: PRAGMA и таблицы. B-tree индексы — отдельным
+/// списком ([`INDEXES_SQL`]) и строятся ПОСЛЕ массовой вставки: поддерживать их
+/// на каждой из сотен тысяч вставок дороже, чем построить одним проходом по
+/// готовым данным (приём из code-index-mcp: `drop_indexes_and_triggers` →
+/// `rebuild_indexes_and_triggers`). Состав схемы от порядка не зависит, а что
+/// индексы действительно есть после сборки, проверяет интеграционный тест.
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode = OFF;      -- при сборке журнал не нужен: база одноразовая
 PRAGMA synchronous = OFF;
@@ -63,10 +66,6 @@ CREATE TABLE methods (
     params      TEXT
 );
 
-CREATE INDEX idx_methods_name_lower ON methods(name_lower);
-CREATE INDEX idx_methods_module     ON methods(module_id);
-CREATE INDEX idx_modules_global     ON modules(is_global);
-
 -- Объект конфигурации: один XML-файл выгрузки <Коллекция>/<Имя>.xml.
 -- Модулей у объекта может не быть вовсе (в УТ 909 из 1069 перечислений),
 -- поэтому список объектов строится по XML, а не по таблице modules.
@@ -77,7 +76,6 @@ CREATE TABLE objects (
     name_lower    TEXT NOT NULL,       -- считается в Rust: SQLite lower() НЕ сворачивает кириллицу
     register_type TEXT                 -- Balance | Turnovers, только у регистров накопления
 );
-CREATE INDEX idx_objects_lookup ON objects(collection, name_lower);
 
 -- Состав объекта: реквизиты, измерения, ресурсы. Нужен правилам оптимальности
 -- запросов: по нему видно, есть ли отбор по измерению виртуальной таблицы и
@@ -94,7 +92,6 @@ CREATE TABLE object_fields (
     kind       TEXT NOT NULL,          -- attribute | dimension | resource
     indexing   TEXT                    -- Index | IndexWithAdditionalOrder; NULL — не индексировано
 );
-CREATE INDEX idx_object_fields_object ON object_fields(object_id);
 
 -- Экспортная переменная модуля приложения (`Перем Имя Экспорт;`).
 -- Видна БЕЗ префикса из любого клиентского модуля, поэтому для проверяющего
@@ -108,7 +105,21 @@ CREATE TABLE global_vars (
     name       TEXT NOT NULL,
     name_lower TEXT NOT NULL
 );
-CREATE INDEX idx_global_vars_name ON global_vars(name_lower);
+"#;
+
+/// B-tree индексы облегчённого индекса. Отделены от [`SCHEMA_SQL`], потому что
+/// создаются ПОСЛЕ вставки данных — одним проходом по готовым таблицам.
+///
+/// UNIQUE на `modules.path` отложить нельзя: SQLite не поддерживает
+/// отложенные (deferrable) ограничения, и его autoindex строится вместе с
+/// таблицей. Это осознанная цена ловли дублей путей, а не недосмотр.
+const INDEXES_SQL: &str = r#"
+CREATE INDEX idx_methods_name_lower ON methods(name_lower);
+CREATE INDEX idx_methods_module     ON methods(module_id);
+CREATE INDEX idx_modules_global     ON modules(is_global);
+CREATE INDEX idx_objects_lookup     ON objects(collection, name_lower);
+CREATE INDEX idx_object_fields_object ON object_fields(object_id);
+CREATE INDEX idx_global_vars_name   ON global_vars(name_lower);
 "#;
 
 /// Известные каталоги-коллекции объектов метаданных (сегмент пути).
@@ -179,7 +190,18 @@ pub struct BuildStats {
     pub global_modules: usize,
     pub objects: usize,
     pub global_vars: usize,
+    /// Полное время сборки, включая построение индексов.
     pub elapsed_ms: u128,
+    /// Один обход выгрузки: списки `.bsl` (модули) и `.xml` (объекты).
+    pub walk_ms: u128,
+    /// Параллельный разбор XML: глобальные общие модули и состав объектов.
+    pub xml_ms: u128,
+    /// Экспортные переменные модулей приложения + параллельный разбор модулей.
+    pub parse_ms: u128,
+    /// Запись в SQLite: схема, транзакция данных, commit.
+    pub db_ms: u128,
+    /// Построение B-tree индексов после вставки данных.
+    pub indexes_ms: u128,
 }
 
 /// Построить индекс из каталога выгрузки. Если `db_path` существует — перезаписывается.
@@ -199,31 +221,26 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
             .with_context(|| format!("не удалось удалить старую базу {}", db_path.display()))?;
     }
 
-    // 1. Список .bsl-файлов выгрузки, минуя служебные каталоги.
-    let bsl_files: Vec<PathBuf> = WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            if !e.file_type().is_dir() {
-                return true;
-            }
-            !matches!(e.file_name().to_str(), Some(".code-index") | Some(".git"))
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("bsl"))
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
+    // 1. Один обход выгрузки: пути .bsl (разбор модулей) и .xml (объекты и
+    // глобальные общие модули) собираются за раз. Раньше дерево обходилось
+    // дважды — второй обход на большой выгрузке стоил сотни миллисекунд.
+    let t = Instant::now();
+    let DumpFiles {
+        bsl: bsl_files,
+        xml: xml_paths,
+    } = collect_dump_files(root);
+    let walk_ms = t.elapsed().as_millis();
 
-    // 2. Факты XML: глобальные общие модули и полный список объектов конфигурации —
-    // единым обходом (см. collect_xml_facts). Второй обход дерева ради одних
-    // объектов не заводим.
-    let xml_facts = collect_xml_facts(root);
+    // 2. Факты XML — параллельно: чтение и разбор тысяч мелких файлов. Порядок
+    // объектов сохраняется (`collect` у rayon повторяет порядок исходной
+    // последовательности, сборка `XmlFacts` идёт после, последовательно).
+    let t = Instant::now();
+    let xml_facts = collect_xml_facts(&xml_paths);
+    let xml_ms = t.elapsed().as_millis();
 
     // 2a. Экспортные переменные модулей приложения: видны без префикса отовсюду.
+    // Вместе с разбором модулей это «фаза чтения и разбора текста».
+    let t = Instant::now();
     let global_var_names = collect_global_vars(&bsl_files);
 
     // 3. Параллельный разбор каждого модуля.
@@ -231,8 +248,10 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
         .par_iter()
         .filter_map(|path| parse_module(root, path, &xml_facts.globals))
         .collect();
+    let parse_ms = t.elapsed().as_millis();
 
     // 4-5. Запись в SQLite: схема + одна транзакция для данных.
+    let t = Instant::now();
     let mut conn = Connection::open(db_path)
         .with_context(|| format!("не удалось создать базу {}", db_path.display()))?;
     conn.execute_batch(SCHEMA_SQL)?;
@@ -324,10 +343,17 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
         }
         tx.commit()?;
     }
+    let db_ms = t.elapsed().as_millis();
+
+    // 6. Индексы — после данных: один проход по готовым таблицам вместо
+    // поддержания B-tree на каждой вставке (см. INDEXES_SQL).
+    let t = Instant::now();
+    conn.execute_batch(INDEXES_SQL)?;
+    let indexes_ms = t.elapsed().as_millis();
 
     let elapsed_ms = start.elapsed().as_millis();
 
-    // 6. meta.
+    // 7. meta.
     let root_abs = std::fs::canonicalize(root)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| root.display().to_string());
@@ -336,6 +362,8 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
         .unwrap_or_default()
         .as_secs();
 
+    // Этапы пишем и в meta: по ним видно, где проходило время на конкретной
+    // выгрузке, уже после сборки и без журналов.
     conn.execute_batch(&format!(
         "INSERT INTO meta (key, value) VALUES
             ('schema_version', '3'),
@@ -345,7 +373,12 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
             ('methods', '{}'),
             ('objects', '{}'),
             ('global_vars', '{}'),
-            ('elapsed_ms', '{}');",
+            ('elapsed_ms', '{}'),
+            ('walk_ms', '{}'),
+            ('xml_ms', '{}'),
+            ('parse_ms', '{}'),
+            ('db_ms', '{}'),
+            ('indexes_ms', '{}');",
         root_abs.replace('\'', "''"),
         built_at,
         modules_count,
@@ -353,6 +386,11 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
         objects_count,
         global_vars_count,
         elapsed_ms,
+        walk_ms,
+        xml_ms,
+        parse_ms,
+        db_ms,
+        indexes_ms,
     ))?;
 
     Ok(BuildStats {
@@ -362,6 +400,11 @@ pub fn build(root: &Path, db_path: &Path, jobs: usize) -> Result<BuildStats> {
         objects: objects_count,
         global_vars: global_vars_count,
         elapsed_ms,
+        walk_ms,
+        xml_ms,
+        parse_ms,
+        db_ms,
+        indexes_ms,
     })
 }
 
@@ -432,8 +475,51 @@ fn collect_global_vars(bsl_files: &[PathBuf]) -> Vec<String> {
     names
 }
 
-/// Факты по XML-выгрузке, извлекаемые ОДНИМ обходом дерева: имена глобальных
-/// общих модулей и полный список объектов конфигурации по коллекциям.
+/// Пути выгрузки, собранные одним обходом дерева.
+struct DumpFiles {
+    /// Модули `.bsl`.
+    bsl: Vec<PathBuf>,
+    /// Файлы метаданных `.xml`.
+    xml: Vec<PathBuf>,
+}
+
+/// Собрать `.bsl` и `.xml` ОДНИМ обходом выгрузки, минуя служебные каталоги.
+///
+/// Раньше дерево обходилось дважды: отдельно `.bsl`, отдельно XML. На большой
+/// выгрузке лишний проход — сотни миллисекунд на ровном месте; здесь оба списка
+/// наполняются за один проход, порядок обхода сохраняется.
+///
+/// Фильтр служебных каталогов теперь действует и на XML (раньше XML-обход его не
+/// применял): файлов метаданных в `.git`/`.code-index` не бывает, зато дублей
+/// объектов оттуда больше не будет.
+fn collect_dump_files(root: &Path) -> DumpFiles {
+    let mut files = DumpFiles {
+        bsl: Vec::new(),
+        xml: Vec::new(),
+    };
+    for entry in WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            if !e.file_type().is_dir() {
+                return true;
+            }
+            !matches!(e.file_name().to_str(), Some(".code-index") | Some(".git"))
+        })
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path();
+        match path.extension().and_then(|ext| ext.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("bsl") => files.bsl.push(path.to_path_buf()),
+            Some(ext) if ext.eq_ignore_ascii_case("xml") => files.xml.push(path.to_path_buf()),
+            _ => {}
+        }
+    }
+    files
+}
+
+/// Факты по XML-выгрузке: имена глобальных общих модулей и полный список
+/// объектов конфигурации по коллекциям.
 struct XmlFacts {
     /// Имена глобальных общих модулей (`<Global>true</Global>`).
     globals: HashSet<String>,
@@ -504,71 +590,78 @@ const COLLECTIONS_WITH_FIELDS: &[&str] = &[
     "DocumentJournals",
 ];
 
-/// Собрать `XmlFacts` одним обходом дерева выгрузки — второй полный обход ради
-/// одних лишь объектов не заводим, `<Коллекция>/<Имя>.xml` и так проходит мимо
-/// при поиске глобальных общих модулей.
-fn collect_xml_facts(root: &Path) -> XmlFacts {
+/// Собрать `XmlFacts`: разбор файлов — параллельно, сборка — в порядке путей.
+///
+/// Порядок объектов повторяет порядок обхода выгрузки, как и до
+/// распараллеливания: от него зависит порядок строк в `objects` и
+/// `object_fields`, а через него — порядок полей в `object_schema` (состав копий
+/// объекта сливается в порядке строк). Поэтому результат `par_iter` собирается
+/// в исходном порядке, а не в порядке завершения потоков.
+///
+/// Пара «флаг глобальности + объект» едет сразу, без промежуточного `Vec` на всю
+/// выгрузку: пик памяти на этой стадии — один результат на файл, а не два.
+fn collect_xml_facts(xml_paths: &[PathBuf]) -> XmlFacts {
+    let facts: Vec<(bool, XmlObject)> = xml_paths
+        .par_iter()
+        .filter_map(|path| parse_xml_fact(path))
+        .collect();
+
     let mut globals = HashSet::new();
-    let mut objects = Vec::new();
-
-    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
-            continue;
+    let mut objects = Vec::with_capacity(facts.len());
+    for (is_global, object) in facts {
+        if is_global {
+            globals.insert(object.name.clone());
         }
-        let path = entry.path();
-        let is_xml = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"));
-        if !is_xml {
-            continue;
+        objects.push(object);
+    }
+    XmlFacts { globals, objects }
+}
+
+/// Разобрать один XML-файл выгрузки: (глобальный ли общий модуль, объект).
+/// `None` — файл не относится к известным коллекциям (или имя не читается):
+/// такие молча пропускаем.
+///
+/// Содержимое читается у общих модулей (нужен признак глобальности) и у
+/// коллекций, которые бывают источником запроса (нужен состав). Для остальных
+/// достаточно имени файла — читать тысячи XML «на всякий случай» незачем.
+fn parse_xml_fact(path: &Path) -> Option<(bool, XmlObject)> {
+    let parent_name = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())?;
+    // Коллекция — КАНОНИЧЕСКОЕ имя из KNOWN_COLLECTIONS (не то, что на диске),
+    // сравнение регистронезависимое, как в parse_path.
+    let collection: &'static str = KNOWN_COLLECTIONS
+        .iter()
+        .find(|k| k.eq_ignore_ascii_case(parent_name))?;
+    let name = path.file_stem().and_then(|s| s.to_str())?.to_string();
+
+    let mut is_global = false;
+    let mut register_type = None;
+    let mut fields = Vec::new();
+
+    if collection == "CommonModules" {
+        // Нечитаемый файл — это «не глобальный», а не пропуск модуля: строка
+        // модуля в индексе появится всё равно (её создаёт разбор .bsl).
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        is_global = content.contains("<Global>true</Global>");
+    } else if COLLECTIONS_WITH_FIELDS.contains(&collection) {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            let parsed = parse_object_xml(&content);
+            register_type = parsed.0;
+            fields = parsed.1;
         }
-        let Some(parent_name) = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-        else {
-            continue;
-        };
-        // Коллекция — КАНОНИЧЕСКОЕ имя из KNOWN_COLLECTIONS (не то, что на диске),
-        // сравнение регистронезависимое, как в parse_path.
-        let Some(collection) = KNOWN_COLLECTIONS
-            .iter()
-            .find(|k| k.eq_ignore_ascii_case(parent_name))
-        else {
-            continue;
-        };
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-
-        // Содержимое читаем у общих модулей (нужен признак глобальности) и у
-        // коллекций, которые бывают источником запроса (нужен состав). Для
-        // остальных достаточно имени файла.
-        let mut register_type = None;
-        let mut fields = Vec::new();
-
-        if *collection == "CommonModules" {
-            let content = std::fs::read_to_string(path).unwrap_or_default();
-            if content.contains("<Global>true</Global>") {
-                globals.insert(stem.to_string());
-            }
-        } else if COLLECTIONS_WITH_FIELDS.contains(collection) {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                let parsed = parse_object_xml(&content);
-                register_type = parsed.0;
-                fields = parsed.1;
-            }
-        }
-
-        objects.push(XmlObject {
-            collection: collection.to_string(),
-            name: stem.to_string(),
-            register_type,
-            fields,
-        });
     }
 
-    XmlFacts { globals, objects }
+    Some((
+        is_global,
+        XmlObject {
+            collection: collection.to_string(),
+            name,
+            register_type,
+            fields,
+        },
+    ))
 }
 
 /// Разобрать XML объекта: вид регистра и состав полей.

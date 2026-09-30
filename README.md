@@ -212,6 +212,27 @@ between platform versions, so code must be validated against the version it is
 written for. If `platform_path` is unset, the server starts and `/health`
 responds, but the MCP tools return `503` with a hint to set the path.
 
+### Platform index cache
+
+Building the index from `shcntx_ru.hbk` is the server's cold start: parsing tens of
+thousands of help pages takes seconds, while the platform file itself does not
+change between starts. The built index is therefore saved to disk and read back on
+the next start:
+
+```toml
+# The field may be omitted: by default the cache lives in <log_dir>/platform-index.cache.
+# platform_cache_path = 'C:\bsl-context-rs\logs\platform-index.cache'
+# platform_cache_path = ""    # an empty string disables the cache: the index is rebuilt from hbk every time
+```
+
+The cache stays valid as long as the platform file (path, size, modification time)
+and the format version are unchanged: a platform or server update silently rebuilds
+it. A corrupt or truncated file means a warning in the log and the usual build from
+`hbk`; without a cache the server behaves exactly as before, it just starts slower.
+Page parsing is parallelised (rayon), so even the first start takes about a second
+rather than several — measured on 8.3.27 (Ryzen 5 3600): built from `hbk` in ~1.3 s,
+loaded from cache in ~0.09 s, start to `listening` in ~0.35 s.
+
 ### Network deployment
 
 By default the server listens on loopback. With `host = "0.0.0.0"` you must add

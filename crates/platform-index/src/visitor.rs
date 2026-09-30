@@ -14,6 +14,27 @@ use hbk_parser::{
     PropertyInfo,
 };
 
+/// Источник html-страниц справки.
+///
+/// Абстракция введена ради параллельной сборки индекса: `HbkContent` — это
+/// zip-архив с `&mut self`, и из нескольких потоков к нему ходят через обёртку
+/// с блокировкой (см. `LockedSource` в `loader`). Публично, потому что
+/// `visit_*` — тоже публичный API крейта.
+pub trait HtmlSource {
+    /// Прочитать страницу по её `htmlPath` из TOC.
+    ///
+    /// `None` — страницы нет (узел TOC бывает «каталогом» без html), это штатный
+    /// случай и он молчит. Настоящий отказ чтения попадает в журнал: пропуск
+    /// страницы не должен быть невидимым (см. `try_read_html`).
+    fn read_html(&mut self, html_path: &str) -> Option<String>;
+}
+
+impl HtmlSource for HbkContent {
+    fn read_html(&mut self, html_path: &str) -> Option<String> {
+        try_read_html(self, html_path)
+    }
+}
+
 /// Категория корневой страницы TOC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootKind {
@@ -124,15 +145,15 @@ fn try_read_html(content: &mut HbkContent, html_path: &str) -> Option<String> {
 }
 
 /// Распарсить страницу системного перечисления + значения из её детей `/properties/`.
-pub fn visit_enum_page(content: &mut HbkContent, page: &Page) -> Option<EnumInfo> {
-    let html = try_read_html(content, &page.html_path)?;
+pub fn visit_enum_page<H: HtmlSource>(content: &mut H, page: &Page) -> Option<EnumInfo> {
+    let html = content.read_html(&page.html_path)?;
     let mut info = parse_enum_page(&html);
 
     for child in &page.children {
         if !child.html_path.contains("/properties/") {
             continue;
         }
-        if let Some(child_html) = try_read_html(content, &child.html_path) {
+        if let Some(child_html) = content.read_html(&child.html_path) {
             info.values.push(parse_enum_value_page(&child_html));
         }
     }
@@ -145,8 +166,8 @@ pub fn visit_enum_page(content: &mut HbkContent, page: &Page) -> Option<EnumInfo
 /// (по русскому `title.ru`; апстрим читает их через `title.en`, но фактически
 /// в `en` у этого подмножества лежат русские строки). Внутри каждой —
 /// листовые страницы конкретных членов.
-pub fn visit_type_page(content: &mut HbkContent, page: &Page) -> Option<ObjectInfo> {
-    let html = try_read_html(content, &page.html_path)?;
+pub fn visit_type_page<H: HtmlSource>(content: &mut H, page: &Page) -> Option<ObjectInfo> {
+    let html = content.read_html(&page.html_path)?;
     let mut info = parse_object_page(&html);
 
     for sub in &page.children {
@@ -166,7 +187,7 @@ pub fn visit_type_page(content: &mut HbkContent, page: &Page) -> Option<ObjectIn
     Some(info)
 }
 
-pub fn visit_properties_page(content: &mut HbkContent, page: &Page) -> Vec<PropertyInfo> {
+pub fn visit_properties_page<H: HtmlSource>(content: &mut H, page: &Page) -> Vec<PropertyInfo> {
     let mut out = Vec::new();
     for child in &page.children {
         if !child.html_path.contains("/properties/") {
@@ -176,17 +197,17 @@ pub fn visit_properties_page(content: &mut HbkContent, page: &Page) -> Vec<Prope
             // Апстрим фильтрует псевдо-имена в угловых скобках (например, `<Свойство>`).
             continue;
         }
-        if let Some(html) = try_read_html(content, &child.html_path) {
+        if let Some(html) = content.read_html(&child.html_path) {
             out.push(parse_property_page(&html));
         }
     }
     out
 }
 
-pub fn visit_methods_page(content: &mut HbkContent, page: &Page) -> Vec<MethodInfo> {
+pub fn visit_methods_page<H: HtmlSource>(content: &mut H, page: &Page) -> Vec<MethodInfo> {
     let mut out = Vec::new();
     for child in &page.children {
-        if let Some(html) = try_read_html(content, &child.html_path) {
+        if let Some(html) = content.read_html(&child.html_path) {
             let info = parse_method_page(&html);
             // У страниц-«каталогов» внутри `/methods/` нет блока «Синтаксис:» —
             // парсер вернёт пустые сигнатуры. Отбрасываем такие записи, чтобы
@@ -199,13 +220,16 @@ pub fn visit_methods_page(content: &mut HbkContent, page: &Page) -> Vec<MethodIn
     out
 }
 
-pub fn visit_constructors_page(content: &mut HbkContent, page: &Page) -> Vec<ConstructorInfo> {
+pub fn visit_constructors_page<H: HtmlSource>(
+    content: &mut H,
+    page: &Page,
+) -> Vec<ConstructorInfo> {
     let mut out = Vec::new();
     for child in &page.children {
         if !child.html_path.contains("/ctors/") {
             continue;
         }
-        if let Some(html) = try_read_html(content, &child.html_path) {
+        if let Some(html) = content.read_html(&child.html_path) {
             out.push(parse_constructor_page(&html));
         }
     }
@@ -214,7 +238,7 @@ pub fn visit_constructors_page(content: &mut HbkContent, page: &Page) -> Vec<Con
 
 /// Глобальные методы: дочерние страницы у `Global context` с путём `/methods/`.
 /// Каждая такая страница — это раздел-каталог с настоящими методами внутри.
-pub fn collect_global_methods(content: &mut HbkContent, global: &Page) -> Vec<MethodInfo> {
+pub fn collect_global_methods<H: HtmlSource>(content: &mut H, global: &Page) -> Vec<MethodInfo> {
     let mut out = Vec::new();
     for child in &global.children {
         if !child.html_path.contains("/methods/") {
@@ -227,7 +251,10 @@ pub fn collect_global_methods(content: &mut HbkContent, global: &Page) -> Vec<Me
 }
 
 /// Глобальные свойства: подстраница «Свойства» у `Global context`, в её детях — реальные свойства.
-pub fn collect_global_properties(content: &mut HbkContent, global: &Page) -> Vec<PropertyInfo> {
+pub fn collect_global_properties<H: HtmlSource>(
+    content: &mut H,
+    global: &Page,
+) -> Vec<PropertyInfo> {
     for child in &global.children {
         let label = if !child.title.ru.is_empty() {
             child.title.ru.as_str()

@@ -183,3 +183,34 @@ fn value_table_has_full_members() {
         first_method.signatures.len()
     );
 }
+
+/// Кэш обязан отдавать ТОТ ЖЕ индекс, что собирается из hbk: холодный старт
+/// ускоряется, а не подменяется другой версией данных. Первый вызов пишет
+/// кэш (сборка из hbk), второй обязан прочитать его и совпасть.
+#[test]
+fn cache_round_trip_matches_fresh_build() {
+    let Some(path) = hbk_path() else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("временный каталог");
+    let cache = dir.path().join("platform-index.cache");
+
+    let fresh = load_from_hbk(&path).expect("сборка из hbk");
+
+    let (loaded, source) = platform_index::load_cached(&path, &cache).expect("первая загрузка");
+    assert_eq!(
+        source,
+        platform_index::LoadSource::Hbk,
+        "первый старт обязан собрать индекс из hbk (кэша ещё нет)"
+    );
+    assert_eq!(loaded, fresh, "записанный кэш разошёлся со свежей сборкой");
+
+    let (cached, source) = platform_index::load_cached(&path, &cache).expect("вторая загрузка");
+    assert_eq!(
+        source,
+        platform_index::LoadSource::Cache,
+        "второй старт обязан прочитать кэш, а не собирать индекс заново"
+    );
+    assert_eq!(cached, fresh, "индекс из кэша разошёлся со свежей сборкой");
+}

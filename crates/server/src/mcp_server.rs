@@ -234,6 +234,10 @@ impl BslContextServer {
             ("platform_path", prev.platform_path != fresh.platform_path),
             ("host", prev.host != fresh.host),
             ("port", prev.port != fresh.port),
+            (
+                "platform_cache_path",
+                prev.platform_cache_path != fresh.platform_cache_path,
+            ),
             ("allowed_hosts", prev.allowed_hosts != fresh.allowed_hosts),
             ("tools.enabled", prev.tools.enabled != fresh.tools.enabled),
             (
@@ -255,8 +259,9 @@ impl BslContextServer {
     /// Перечитать config.toml и подменить карту источников имён целиком.
     ///
     /// Применяется только список `[[symbol_sources]]`: `platform_path`, `host`,
-    /// `port`, `allowed_hosts`, `[tools].enabled` и дефолты проверки требуют
-    /// перезапуска — об их изменении пишется предупреждение в журнал.
+    /// `port`, `allowed_hosts`, `platform_cache_path`, `[tools].enabled` и дефолты
+    /// проверки требуют перезапуска — об их изменении пишется предупреждение в
+    /// журнал.
     ///
     /// Слот, настройки которого не изменились, переносится в новую карту тем же
     /// `Arc`: пересоздание погасило бы кэш и разорвало сессию к code-index у уже
@@ -563,6 +568,12 @@ impl BslContextServer {
             "methods": stats.methods,
             "global_modules": stats.global_modules,
             "elapsed_ms": stats.elapsed_ms,
+            // Этапы: видно, где прошло время (обход, XML, разбор, запись, индексы).
+            "walk_ms": stats.walk_ms,
+            "xml_ms": stats.xml_ms,
+            "parse_ms": stats.parse_ms,
+            "db_ms": stats.db_ms,
+            "indexes_ms": stats.indexes_ms,
             "db_path": db_path.display().to_string(),
         })
         .to_string())

@@ -4,6 +4,9 @@
 //! bsl-lite-index build --root <каталог выгрузки> --db <файл.db> [--jobs N]
 //! bsl-lite-index stats --db <файл.db>
 //! ```
+//!
+//! `build` собирает базу во временный файл рядом и подменяет ей `--db`
+//! переименованием: обрыв процесса не оставит битую базу на месте рабочей.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -23,6 +26,13 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let command = args.next().context("укажите команду: build | stats")?;
+
+    // Версия — для провенанса замеров и диагностики: у серверного бинарника
+    // `--version` даёт clap, здесь его не было.
+    if command == "--version" || command == "-V" {
+        println!("bsl-lite-index {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     match command.as_str() {
         "build" => run_build(args),
@@ -59,10 +69,36 @@ fn run_build(args: impl Iterator<Item = String>) -> Result<()> {
     let root = root.context("укажите --root <каталог выгрузки>")?;
     let db = db.context("укажите --db <файл.db>")?;
 
-    let stats = lite_index::build(&root, &db, jobs)?;
+    // Сборка — во временный файл рядом и переименование: обрыв процесса не
+    // оставит битую базу на месте рабочей (серверный путь, `rebuild_inner`,
+    // делает так же). Обрывок при ошибке убираем за собой.
+    let mut tmp_name = db.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+
+    let stats = match lite_index::build(&root, &tmp, jobs) {
+        Ok(stats) => stats,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    std::fs::rename(&tmp, &db).with_context(|| {
+        format!(
+            "не удалось переместить {} → {}",
+            tmp.display(),
+            db.display()
+        )
+    })?;
+
     println!("модулей: {}", stats.modules);
     println!("методов: {}", stats.methods);
     println!("глобальных модулей: {}", stats.global_modules);
+    println!("обход выгрузки: {} мс", stats.walk_ms);
+    println!("xml-факты: {} мс", stats.xml_ms);
+    println!("разбор модулей: {} мс", stats.parse_ms);
+    println!("запись в базу: {} мс", stats.db_ms);
+    println!("индексы: {} мс", stats.indexes_ms);
     println!("время: {} мс", stats.elapsed_ms);
 
     Ok(())

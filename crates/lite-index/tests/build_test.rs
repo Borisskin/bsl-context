@@ -139,3 +139,156 @@ fn build_indexes_all_modules_and_flags() {
         enums
     );
 }
+
+/// Индексы строятся ПОСЛЕ вставки данных (см. `INDEXES_SQL`), поэтому их
+/// наличие проверяется отдельно: забытый `INDEXES_SQL` не сломает запросы —
+/// они продолжат работать полным сканом, и деградация была бы тихой.
+#[test]
+fn build_creates_all_indexes() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup(tmp.path());
+
+    let db_path = tmp.path().join("lite.db");
+    build(tmp.path(), &db_path, 0).unwrap();
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .unwrap();
+    let indexes: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+
+    for expected in [
+        "idx_methods_name_lower",
+        "idx_methods_module",
+        "idx_modules_global",
+        "idx_objects_lookup",
+        "idx_object_fields_object",
+        "idx_global_vars_name",
+    ] {
+        assert!(
+            indexes.iter().any(|name| name == expected),
+            "после сборки нет индекса {expected}: {indexes:?}"
+        );
+    }
+}
+
+/// Этапы сборки заполнены и укладываются в общее время: по ним скрипт замера
+/// и `rebuild_symbol_index` показывают, где прошло время.
+#[test]
+fn build_reports_stage_timings() {
+    let tmp = tempfile::tempdir().unwrap();
+    setup(tmp.path());
+
+    let db_path = tmp.path().join("lite.db");
+    let stats = build(tmp.path(), &db_path, 0).unwrap();
+
+    let stages = stats.walk_ms + stats.xml_ms + stats.parse_ms + stats.db_ms + stats.indexes_ms;
+    assert!(
+        stages <= stats.elapsed_ms,
+        "сумма этапов ({stages} мс) больше общего времени ({} мс)",
+        stats.elapsed_ms
+    );
+
+    // Этапы продублированы в meta — уже после сборки видно, где прошло время.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    for key in ["walk_ms", "xml_ms", "parse_ms", "db_ms", "indexes_ms"] {
+        let value: String = conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("в meta нет ключа {key}: {e}"));
+        assert!(value.parse::<u128>().is_ok(), "{key} = {value:?} не число");
+    }
+}
+
+/// Порядок объектов в базе повторяет порядок обхода выгрузки, а поля внутри
+/// объекта — порядок в XML. От этих порядков зависят строки `object_fields` и
+/// порядок состава в `object_schema` (слияние копий идёт в порядке строк),
+/// поэтому распараллеленный разбор XML не должен их менять.
+#[test]
+fn objects_and_fields_keep_source_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // Полторы сотни объектов: параллельный разбор должен пройти через пул, а не
+    // уложиться в один поток. Порядок сверяется с тем же обходом дерева.
+    for index in 0..150 {
+        let name = format!("Справочник{index:03}");
+        write_file(
+            root,
+            &format!("base/Catalogs/{name}.xml"),
+            &format!(
+                "<?xml version=\"1.0\"?>\n<MetaDataObject><Catalog><Properties><Name>{name}</Name></Properties></MetaDataObject>\n"
+            ),
+        );
+    }
+    write_file(
+        root,
+        "base/Documents/Заказ.xml",
+        "<?xml version=\"1.0\"?>\n\
+         <MetaDataObject><Document><Properties><Name>Заказ</Name></Properties><ChildObjects>\n\
+         <Attribute><Properties><Name>Первый</Name></Properties></Attribute>\n\
+         <Attribute><Properties><Name>Второй</Name><Indexing>Index</Indexing></Properties></Attribute>\n\
+         <Attribute><Properties><Name>Третий</Name></Properties></Attribute>\n\
+         </ChildObjects></Document></MetaDataObject>\n",
+    );
+
+    let db_path = root.join("lite.db");
+    build(root, &db_path, 0).unwrap();
+
+    // Поля документа — в порядке XML.
+    let index = LiteIndex::open(&db_path).unwrap();
+    let schema = index
+        .object_schema("Documents", "заказ")
+        .unwrap()
+        .expect("Заказ должен быть в индексе");
+    let names: Vec<&str> = schema.fields.iter().map(|(n, ..)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Первый", "Второй", "Третий"],
+        "порядок полей разошёлся"
+    );
+
+    // Объекты — в порядке обхода дерева; тест повторяет тот же обход.
+    let mut expected: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let is_xml = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"));
+        if !is_xml {
+            continue;
+        }
+        let parent = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        if !matches!(parent, Some("Catalogs") | Some("Documents")) {
+            continue;
+        }
+        expected.push(path.file_stem().unwrap().to_string_lossy().to_string());
+    }
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let actual: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM objects WHERE collection IN ('Catalogs', 'Documents') ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        actual, expected,
+        "порядок объектов разошёлся с порядком обхода"
+    );
+}

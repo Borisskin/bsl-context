@@ -21,11 +21,29 @@ pub struct PlatformIndex {
     /// имя давало находку «тип не найден» на законном коде. Отдельная карта, а
     /// не обход при промахе: `find_type` зовётся на каждое обращение, а типов
     /// больше двух тысяч.
-    types_en: HashMap<String, String>,
+    ///
+    /// `pub(crate)` — карта сохраняется в дисковый кэш как есть: восстановить её
+    /// из `types` после десериализации можно только приблизительно (при
+    /// столкновении английских имён побеждает последний вставленный тип, а
+    /// порядок вставки кэш не хранит).
+    pub(crate) types_en: HashMap<String, String>,
     /// Ленивый кэш имён методов всех типов (см. `all_type_method_names`).
     /// Обход 2414 типов стоит десятки миллисекунд — на каждый вызов
     /// `validate_module` это заметно, а индекс после загрузки неизменен.
     type_method_names: OnceLock<HashSet<String>>,
+}
+
+/// Содержимое индекса совпадает. `type_method_names` — производное от `types`
+/// (ленивый кэш имён методов), поэтому в сравнении не участвует: индекс из
+/// кэша обязан быть равен собранному из hbk по содержимому, но не по состоянию
+/// вторичных карт, которые пересчитываются.
+impl PartialEq for PlatformIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.global_methods == other.global_methods
+            && self.global_properties == other.global_properties
+            && self.types == other.types
+            && self.types_en == other.types_en
+    }
 }
 
 impl PlatformIndex {
