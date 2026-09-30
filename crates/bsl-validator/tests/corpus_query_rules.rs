@@ -123,7 +123,7 @@ fn query_rules_on_real_ut_corpus() {
         }
     }
 
-    per_module.sort_by(|a, b| b.0.cmp(&a.0));
+    per_module.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     println!("\n── Модули с наибольшим числом находок ──");
     for (count, module) in per_module.iter().take(10) {
         println!("{count:>5}  {module}");

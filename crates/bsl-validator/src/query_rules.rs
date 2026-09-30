@@ -466,11 +466,8 @@ fn check_join_fields(
                     indexed_found = true;
                     break;
                 }
-                Some(_) => {
-                    if unindexed.is_none() {
-                        unindexed = Some(field);
-                    }
-                }
+                Some(_) if unindexed.is_none() => unindexed = Some(field),
+                Some(_) => {}
                 // Поля в составе нет — молчим, а не гадаем.
                 None => {}
             }

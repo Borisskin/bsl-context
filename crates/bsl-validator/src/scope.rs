@@ -407,14 +407,13 @@ fn resolve_chain_type(
             .find(|m| m.name_ru.to_lowercase() == key || m.name_en.to_lowercase() == key)
         {
             m.return_type.clone()
-        } else if let Some(p) = ty
-            .properties
-            .iter()
-            .find(|p| p.name_ru.to_lowercase() == key || p.name_en.to_lowercase() == key)
-        {
-            p.type_name.clone()
         } else {
-            return None; // член не найден — тип не выводим
+            // член не найден — тип не выводим
+            ty.properties
+                .iter()
+                .find(|p| p.name_ru.to_lowercase() == key || p.name_en.to_lowercase() == key)?
+                .type_name
+                .clone()
         };
         cur = primary_type(index, &next)?;
     }
