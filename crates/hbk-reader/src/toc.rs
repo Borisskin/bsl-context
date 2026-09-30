@@ -26,6 +26,7 @@
 //!
 //! Порт `Tokenizer.kt` + `TocParser.kt` + `Toc.kt` (alkoleft).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::error::{HbkError, Result};
@@ -39,85 +40,116 @@ const BOM: char = '\u{FEFF}';
 // Tokenizer
 // ============================================================================
 
-fn tokenize(content: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
+/// Разобрать поток токенов одним проходом по тексту.
+///
+/// Токены — срезы исходного текста (`Cow`: собственный `String` только для
+/// строк с экранированием `""`, что редкость), а не новые `String` на каждый
+/// токен: на TOC платформы это ~300 тысяч аллокаций, и две трети времени
+/// `parse_toc` уходило именно на них. Раньше текст ещё и полностью
+/// раскладывался в `Vec<char>` перед разбором, а запятые попадали в поток и
+/// выбрасывались финальным фильтром — теперь этого нет.
+///
+/// Экранирование `""` внутри строки разворачивается в одну кавычку (как и
+/// раньше); незакрытая строка в конце данных остаётся сырым срезом от
+/// открывающей кавычки — `parse_string` учитывает оба случая.
+fn tokenize(content: &str) -> Vec<Cow<'_, str>> {
+    let mut tokens: Vec<Cow<'_, str>> = Vec::with_capacity(content.len() / 16);
+    // Начало накапливаемого атома вне строки (число или имя без кавычек).
+    let mut atom_start: Option<usize> = None;
+    let mut string_start = 0usize;
     let mut in_string = false;
-    let chars: Vec<char> = content.chars().collect();
+    let mut escaped = false;
+    let mut chars = content.char_indices().peekable();
 
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
+    while let Some((i, ch)) = chars.next() {
         if ch == BOM {
-            i += 1;
+            // Как и раньше, BOM молча пропускается в любом месте потока.
             continue;
         }
-        if ch == '"' {
-            if in_string {
-                // Экранирование: "" внутри строки → одиночная кавычка.
-                if i + 1 < chars.len() && chars[i + 1] == '"' {
-                    current.push('"');
-                    i += 1;
+        if in_string {
+            if ch == '"' {
+                if chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    // Экранирование: "" внутри строки → одиночная кавычка.
+                    escaped = true;
+                    chars.next();
                 } else {
-                    current.push(ch);
-                    tokens.push(std::mem::take(&mut current));
+                    let end = i + ch.len_utf8();
+                    tokens.push(unescape_cow(&content[string_start..end], escaped));
                     in_string = false;
                 }
-            } else {
-                if !current.is_empty() {
-                    tokens.push(current.trim().to_string());
-                    current.clear();
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                if let Some(start) = atom_start.take() {
+                    tokens.push(Cow::Borrowed(&content[start..i]));
                 }
-                current.push(ch);
+                string_start = i;
+                escaped = false;
                 in_string = true;
             }
-        } else if in_string {
-            current.push(ch);
-        } else if ch.is_whitespace() {
-            if !current.is_empty() {
-                tokens.push(current.trim().to_string());
-                current.clear();
+            ch if ch.is_whitespace() || ch == ',' => {
+                // Запятые — разделители, токенами они не становятся (раньше их
+                // снимал финальный фильтр).
+                if let Some(start) = atom_start.take() {
+                    tokens.push(Cow::Borrowed(&content[start..i]));
+                }
             }
-        } else if ch == '{' || ch == '}' || ch == ',' {
-            if !current.is_empty() {
-                tokens.push(current.trim().to_string());
-                current.clear();
+            '{' | '}' => {
+                if let Some(start) = atom_start.take() {
+                    tokens.push(Cow::Borrowed(&content[start..i]));
+                }
+                tokens.push(Cow::Borrowed(&content[i..i + ch.len_utf8()]));
             }
-            tokens.push(ch.to_string());
-        } else {
-            current.push(ch);
+            _ => {
+                if atom_start.is_none() {
+                    atom_start = Some(i);
+                }
+            }
         }
-        i += 1;
     }
-    if !current.is_empty() {
-        tokens.push(current.trim().to_string());
+
+    if in_string {
+        // Данные оборвались внутри строки — токен от открывающей кавычки до
+        // конца текста (это ожидает `parse_string`).
+        tokens.push(unescape_cow(&content[string_start..], escaped));
+    } else if let Some(start) = atom_start {
+        tokens.push(Cow::Borrowed(&content[start..]));
     }
     tokens
-        .into_iter()
-        .filter(|t| !t.is_empty() && t != ",")
-        .collect()
+}
+
+/// Развернуть `""` в одну кавычку; без экранирования срез отдаётся как есть.
+fn unescape_cow<'a>(raw: &'a str, escaped: bool) -> Cow<'a, str> {
+    if escaped {
+        Cow::Owned(raw.replace("\"\"", "\""))
+    } else {
+        Cow::Borrowed(raw)
+    }
 }
 
 // ============================================================================
 // Stream-helpers
 // ============================================================================
 
-struct TokenStream {
-    tokens: Vec<String>,
+struct TokenStream<'a> {
+    /// Токены — срезы текста TOC: при выдаче ничего не клонируется.
+    tokens: Vec<Cow<'a, str>>,
     pos: usize,
 }
 
-impl TokenStream {
-    fn new(tokens: Vec<String>) -> Self {
+impl<'a> TokenStream<'a> {
+    fn new(tokens: Vec<Cow<'a, str>>) -> Self {
         Self { tokens, pos: 0 }
     }
 
     fn peek(&self) -> Option<&str> {
-        self.tokens.get(self.pos).map(|s| s.as_str())
+        self.tokens.get(self.pos).map(Cow::as_ref)
     }
 
-    fn next(&mut self) -> Option<String> {
-        let t = self.tokens.get(self.pos).cloned();
+    fn next(&mut self) -> Option<&str> {
+        let t = self.tokens.get(self.pos).map(Cow::as_ref);
         if t.is_some() {
             self.pos += 1;
         }
@@ -142,6 +174,17 @@ impl TokenStream {
             .ok_or_else(|| HbkError::TocParse(format!("{ctx}: не найден токен (конец данных)")))?;
         got.parse::<i32>()
             .map_err(|_| HbkError::TocParse(format!("{ctx}: ожидалось число, получено '{got}'")))
+    }
+
+    /// Как [`Self::parse_number`], но с номером элемента; `format!` контекста
+    /// строится только при ошибке, а не на каждый разбор childId.
+    fn parse_number_at(&mut self, ctx: &str, index: usize) -> Result<i32> {
+        let got = self.next().ok_or_else(|| {
+            HbkError::TocParse(format!("{ctx} #{index}: не найден токен (конец данных)"))
+        })?;
+        got.parse::<i32>().map_err(|_| {
+            HbkError::TocParse(format!("{ctx} #{index}: ожидалось число, получено '{got}'"))
+        })
     }
 
     fn parse_string(&mut self, ctx: &str) -> Result<String> {
@@ -182,14 +225,14 @@ fn parse_chunks(content: &str) -> Result<Vec<Chunk>> {
     Ok(chunks)
 }
 
-fn parse_chunk(s: &mut TokenStream) -> Result<Chunk> {
+fn parse_chunk(s: &mut TokenStream<'_>) -> Result<Chunk> {
     s.expect("{", "Chunk: ожидался '{'")?;
     let id = s.parse_number("Chunk: ожидался id")?;
     let parent_id = s.parse_number("Chunk: ожидался parentId")?;
     let child_count = s.parse_number("Chunk: ожидался childCount")?;
     let mut child_ids = Vec::with_capacity(child_count.max(0) as usize);
     for i in 0..child_count {
-        child_ids.push(s.parse_number(&format!("Chunk: ожидался childId #{}", i + 1))?);
+        child_ids.push(s.parse_number_at("Chunk: ожидался childId", (i + 1) as usize)?);
     }
     let properties = parse_properties_container(s)?;
     s.expect("}", "Chunk: ожидался '}' в конце chunk")?;
@@ -202,7 +245,7 @@ fn parse_chunk(s: &mut TokenStream) -> Result<Chunk> {
     })
 }
 
-fn parse_properties_container(s: &mut TokenStream) -> Result<PropertiesContainer> {
+fn parse_properties_container(s: &mut TokenStream<'_>) -> Result<PropertiesContainer> {
     s.expect("{", "PropertiesContainer: ожидался '{'")?;
     let n1 = s.parse_number("PropertiesContainer: ожидался number1")?;
     let n2 = s.parse_number("PropertiesContainer: ожидался number2")?;
@@ -217,7 +260,7 @@ fn parse_properties_container(s: &mut TokenStream) -> Result<PropertiesContainer
     })
 }
 
-fn parse_name_container(s: &mut TokenStream) -> Result<NameContainer> {
+fn parse_name_container(s: &mut TokenStream<'_>) -> Result<NameContainer> {
     s.expect("{", "NameContainer: ожидался '{'")?;
     let n1 = s.parse_number("NameContainer: ожидался number1")?;
     let n2 = s.parse_number("NameContainer: ожидался number2")?;
@@ -237,7 +280,7 @@ fn parse_name_container(s: &mut TokenStream) -> Result<NameContainer> {
     })
 }
 
-fn parse_name_object(s: &mut TokenStream) -> Result<NameObject> {
+fn parse_name_object(s: &mut TokenStream<'_>) -> Result<NameObject> {
     s.expect("{", "NameObject: ожидался '{'")?;
     let language_code = s.parse_string("NameObject: ожидался languageCode")?;
     let name = s.parse_string("NameObject: ожидался name")?;
