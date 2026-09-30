@@ -164,6 +164,39 @@ const PLATFORM_INDEX_TOOLS: [&str; 10] = [
     "reserved_names",
 ];
 
+fn cold_changes(
+    prev: &crate::config::Config,
+    fresh: &crate::config::Config,
+    platform_path_from_cli: bool,
+) -> Vec<&'static str> {
+    let changed = [
+        (
+            "platform_path",
+            !platform_path_from_cli && prev.platform_path != fresh.platform_path,
+        ),
+        ("host", prev.host != fresh.host),
+        ("port", prev.port != fresh.port),
+        (
+            "platform_cache_path",
+            prev.platform_cache_path != fresh.platform_cache_path,
+        ),
+        ("allowed_hosts", prev.allowed_hosts != fresh.allowed_hosts),
+        ("tools.enabled", prev.tools.enabled != fresh.tools.enabled),
+        (
+            "default_validation_level",
+            prev.default_validation_level != fresh.default_validation_level,
+        ),
+        (
+            "default_profile",
+            prev.default_profile != fresh.default_profile,
+        ),
+    ];
+    changed
+        .into_iter()
+        .filter_map(|(name, is_changed)| is_changed.then_some(name))
+        .collect()
+}
+
 impl BslContextServer {
     pub fn new(index: PlatformIndex) -> Self {
         Self::with_defaults(index, 1, Profile::Full)
@@ -213,6 +246,16 @@ impl BslContextServer {
         server
     }
 
+    /// Загружен ли платформенный индекс.
+    pub fn index_loaded(&self) -> bool {
+        self.unavailable_reason.is_none()
+    }
+
+    /// Причина недоступности платформенного индекса, если он не загружен.
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        self.unavailable_reason.as_deref()
+    }
+
     /// Подключить именованные источники имён (по одному на конфигурацию). Вызывается
     /// на старте; дальше карту целиком подменяет перечитка config.toml
     /// (`reload_sources_from_config`), а содержимое слотов меняется пересборкой
@@ -235,12 +278,6 @@ impl BslContextServer {
     /// Слот по алиасу — через снимок карты.
     pub fn slot(&self, repo: &str) -> Option<Arc<SourceSlot>> {
         self.sources_snapshot().get(repo).cloned()
-    }
-
-    /// Handle карты — для `http.rs`: /health читает карту на каждый запрос, а
-    /// перечитка подменяет её целиком, поэтому держать надо handle, а не снимок.
-    pub fn sources_handle(&self) -> SourceMapHandle {
-        self.sources.clone()
     }
 
     /// Подменить карту целиком. Блокировка на запись живёт без `await`: у уже
@@ -268,16 +305,6 @@ impl BslContextServer {
         self
     }
 
-    /// Заменить снимок «холодных» полей действующей конфигурацией — после
-    /// наложения опций командной строки (`--platform-path`). Без этого
-    /// `reload_config` сравнивал бы файл с файлом: предупреждение «применится
-    /// после перезапуска» называло бы источником значение из файла, которое
-    /// при активной опции не применяется.
-    pub fn with_effective_config(self, effective: crate::config::Config) -> Self {
-        *self.cold_baseline.lock().unwrap() = Some(effective);
-        self
-    }
-
     /// Отметить, что `platform_path` пришёл из опции командной строки и
     /// перекрывает значение файла: при перечитке config.toml это поле не
     /// сравнивается — файл всё равно не может его изменить.
@@ -296,32 +323,8 @@ impl BslContextServer {
             guard.replace(fresh.clone())
         };
         let Some(prev) = prev else { return };
-        let changed = [
-            (
-                "platform_path",
-                !self.platform_path_from_cli && prev.platform_path != fresh.platform_path,
-            ),
-            ("host", prev.host != fresh.host),
-            ("port", prev.port != fresh.port),
-            (
-                "platform_cache_path",
-                prev.platform_cache_path != fresh.platform_cache_path,
-            ),
-            ("allowed_hosts", prev.allowed_hosts != fresh.allowed_hosts),
-            ("tools.enabled", prev.tools.enabled != fresh.tools.enabled),
-            (
-                "default_validation_level",
-                prev.default_validation_level != fresh.default_validation_level,
-            ),
-            (
-                "default_profile",
-                prev.default_profile != fresh.default_profile,
-            ),
-        ];
-        for (name, is_changed) in changed {
-            if is_changed {
-                tracing::warn!("поле {name} изменилось, применится после перезапуска");
-            }
+        for name in cold_changes(&prev, fresh, self.platform_path_from_cli) {
+            tracing::warn!("поле {name} изменилось, применится после перезапуска");
         }
     }
 
@@ -590,9 +593,22 @@ impl BslContextServer {
         let swapped =
             tokio::task::spawn_blocking(move || -> anyhow::Result<symbol_source::LiteSource> {
                 if db_c.exists() {
-                    std::fs::remove_file(&db_c).with_context(|| {
-                        format!("не удалось удалить старую базу {}", db_c.display())
-                    })?;
+                    if let Err(e) = std::fs::remove_file(&db_c) {
+                        // Windows не удаляет файл, открытый другим процессом
+                        // (ERROR_SHARING_VIOLATION = 32): базу держит другой сеанс
+                        // stdio или служба. Называем причину, а не код ОС.
+                        if e.raw_os_error() == Some(32) {
+                            anyhow::bail!(
+                                "база {} занята другим процессом (другой сеанс или служба \
+                                 bsl-context) — пересоберите, когда он закроется",
+                                db_c.display()
+                            );
+                        }
+                        return Err(anyhow::Error::new(e).context(format!(
+                            "не удалось удалить старую базу {}",
+                            db_c.display()
+                        )));
+                    }
                 }
                 std::fs::rename(&tmp_c, &db_c).with_context(|| {
                     format!(
@@ -1390,11 +1406,29 @@ impl ServerHandler for BslContextServer {
                 .to_string(),
             // Причину видно клиенту в описании сервера, не дожидаясь отказа
             // первого вызова инструмента.
-            Some(reason) => format!(
-                "MCP-сервер контекста платформы 1С: платформенный контекст НЕ загружен — \
-                 {reason}. Справочные инструменты отвечают отказом; доступны reload_config, \
-                 symbol_sources_status, reconnect_symbol_source и rebuild_symbol_index."
-            ),
+            Some(reason) => {
+                let mut maintenance_tools: Vec<String> = self
+                    .tool_router
+                    .list_all()
+                    .into_iter()
+                    .filter(|tool| {
+                        !PLATFORM_INDEX_TOOLS.contains(&tool.name.as_ref())
+                            && self.is_tool_allowed(tool.name.as_ref())
+                    })
+                    .map(|tool| tool.name.to_string())
+                    .collect();
+                maintenance_tools.sort();
+                let mut instructions = format!(
+                    "MCP-сервер контекста платформы 1С: платформенный контекст НЕ загружен — \
+                     {reason}. Справочные инструменты отвечают отказом"
+                );
+                if !maintenance_tools.is_empty() {
+                    instructions.push_str(&format!("; доступны {}.", maintenance_tools.join(", ")));
+                } else {
+                    instructions.push('.');
+                }
+                instructions
+            }
         });
         info.capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()
@@ -1457,6 +1491,43 @@ impl ServerHandler for BslContextServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_info_lists_only_allowed_maintenance_tools() {
+        let server = BslContextServer::unavailable("причина".into(), 1, Profile::Full)
+            .apply_tools_whitelist(&["search".into(), "symbol_sources_status".into()]);
+        let instructions = server.get_info().instructions.unwrap();
+        assert!(instructions.contains("причина"));
+        assert!(instructions.contains("НЕ загружен"));
+        assert!(instructions.contains("symbol_sources_status"));
+        assert!(!instructions.contains("reload_config"));
+        assert!(!instructions.contains("reconnect_symbol_source"));
+        assert!(!instructions.contains("rebuild_symbol_index"));
+    }
+
+    #[test]
+    fn unavailable_info_omits_maintenance_tools_when_all_hidden() {
+        let server = BslContextServer::unavailable("причина".into(), 1, Profile::Full)
+            .apply_tools_whitelist(&["search".into()]);
+        let instructions = server.get_info().instructions.unwrap();
+        for name in TOOLS_WITHOUT_INDEX {
+            assert!(!instructions.contains(name));
+        }
+        assert!(!instructions.contains("доступны"));
+    }
+
+    #[test]
+    fn cold_changes_skip_platform_path_from_cli() {
+        let prev = crate::config::Config::default();
+        let mut fresh = crate::config::Config {
+            platform_path: Some(PathBuf::from("other-platform")),
+            ..crate::config::Config::default()
+        };
+        assert!(cold_changes(&prev, &fresh, true).is_empty());
+        assert_eq!(cold_changes(&prev, &fresh, false), ["platform_path"]);
+        fresh.port = prev.port + 1;
+        assert_eq!(cold_changes(&prev, &fresh, true), ["port"]);
+    }
 
     /// Инструменты, не зависящие от платформенного индекса: обязаны работать,
     /// когда справка не загружена (иначе сервер без `platform_path` нельзя

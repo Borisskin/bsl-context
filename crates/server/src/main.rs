@@ -92,8 +92,8 @@ async fn main() -> anyhow::Result<()> {
     if cfg.platform_path.is_none() {
         tracing::warn!(
             "platform_path не задан в конфиге. Сервер стартует, но инструменты \
-             справки будут отвечать отказом (в сетевом режиме — 503, /health \
-             отвечает): индекс не загружен. На многоплатформенных машинах \
+             справки будут отвечать отказом в обоих режимах, служебные работают: \
+             индекс не загружен. На многоплатформенных машинах \
              укажите каталог нужной версии 1С явно — например \
              'C:\\Program Files\\1cv8\\8.3.27.1786'. Автодетектора нет специально."
         );
@@ -102,23 +102,22 @@ async fn main() -> anyhow::Result<()> {
     // Источники имён конфигураций (по одному на конфигурацию, у каждого свой способ
     // доступа). Ошибка создания конкретного источника не валит сервер: предупреждение
     // в лог, валидация по этой конфигурации пойдёт без знания её имён.
-    let mut source_slots = Some(
-        cfg.resolved_symbol_sources()?
-            .into_iter()
-            .map(|(name, sc)| {
-                let built = build_symbol_source(&sc);
-                if let Err(msg) = &built {
-                    // Причину надо и в журнал, и в слот: инструмент
-                    // symbol_sources_status отдаёт её вызывающему, не заставляя
-                    // читать логи сервера.
-                    error!(source = %name, error = %msg, "источник имён конфигурации не подключён");
-                }
-                (name, sc, built)
-            })
-            .collect::<Vec<_>>(),
-    );
+    let source_slots: Vec<_> = cfg
+        .resolved_symbol_sources()?
+        .into_iter()
+        .map(|(name, sc)| {
+            let built = build_symbol_source(&sc);
+            if let Err(msg) = &built {
+                // Причину надо и в журнал, и в слот: инструмент
+                // symbol_sources_status отдаёт её вызывающему, не заставляя
+                // читать логи сервера.
+                error!(source = %name, error = %msg, "источник имён конфигурации не подключён");
+            }
+            (name, sc, built)
+        })
+        .collect();
     info!(
-        sources = ?source_slots.as_ref().expect("слоты только что собраны").iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(),
+        sources = ?source_slots.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(),
         "конфигурации, доступные параметру repo"
     );
 
@@ -129,10 +128,61 @@ async fn main() -> anyhow::Result<()> {
     // `platform_cache_path`): повторный старт читает кэш вместо разбора (~0,09 с).
     //
     // Индекс не собрался из-за отсутствия пути или файла — это не повод не
-    // стартовать: в сетевом режиме отдаётся прежняя 503-заглушка, в stdio —
-    // сервер отвечает понятной причиной на вызовы справки (см. `unavailable`).
-    let mut unavailable_reason: Option<String> = None;
-    let mcp = if let Some(platform_path) = cfg.platform_path.clone() {
+    // стартовать: в обоих режимах справочные инструменты отвечают отказом,
+    // служебные работают (см. `unavailable`).
+    let mut server = match load_platform_index(&cfg, &platform_path_display).await? {
+        Ok(index) => mcp_server::BslContextServer::with_defaults(
+            index,
+            cfg.default_validation_level,
+            cfg.default_profile,
+        ),
+        Err(reason) => {
+            tracing::warn!(%reason, "справка платформы недоступна");
+            mcp_server::BslContextServer::unavailable(
+                reason,
+                cfg.default_validation_level,
+                cfg.default_profile,
+            )
+        }
+    }
+    .with_sources(source_slots)
+    .apply_tools_whitelist(&cfg.tools.enabled)
+    .with_cli_platform_path(cli.platform_path.is_some());
+    // Путь нужен инструменту reload_config: без него перечитывать
+    // config.toml нечего, и вызов честно отвечает отказом.
+    if let Some(path) = cli.config.clone() {
+        server = server.with_config_path(path);
+    }
+
+    match cli.transport {
+        Transport::Http => {
+            let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
+            let app = http::router(cfg.clone(), server);
+
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!(%addr, "listening");
+
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+            {
+                error!(error = %e, "server stopped with error");
+                return Err(e.into());
+            }
+            info!("graceful shutdown complete");
+        }
+        Transport::Stdio => {
+            serve_stdio(server).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn load_platform_index(
+    cfg: &config::Config,
+    platform_path_display: &str,
+) -> anyhow::Result<Result<platform_index::PlatformIndex, String>> {
+    if let Some(platform_path) = cfg.platform_path.clone() {
         let hbk_candidates = [
             platform_path.join("shcntx_ru.hbk"),
             platform_path.join("bin").join("shcntx_ru.hbk"),
@@ -156,97 +206,29 @@ async fn main() -> anyhow::Result<()> {
                     global_properties = index.global_properties.len(),
                     "PlatformIndex загружен"
                 );
-                let slots = source_slots
-                    .take()
-                    .expect("слоты источников передаются серверу один раз");
-                let mut server = mcp_server::BslContextServer::with_defaults(
-                    index,
-                    cfg.default_validation_level,
-                    cfg.default_profile,
-                )
-                .with_sources(slots)
-                .apply_tools_whitelist(&cfg.tools.enabled)
-                .with_cli_platform_path(cli.platform_path.is_some());
-                // Путь нужен инструменту reload_config: без него перечитывать
-                // config.toml нечего, и вызов честно отвечает отказом.
-                if let Some(path) = cli.config.clone() {
-                    server = server
-                        .with_config_path(path)
-                        .with_effective_config(cfg.clone());
-                }
-                Some(server)
+                Ok(Ok(index))
             }
             None => {
-                unavailable_reason = Some(format!(
+                let reason = format!(
                     "в каталоге '{platform_path_display}' и его подкаталоге bin/ не найден \
                      shcntx_ru.hbk — проверьте platform_path"
-                ));
+                );
                 tracing::warn!(
                     %platform_path_display,
                     "не найден shcntx_ru.hbk в platform_path и его подкаталоге bin/. \
-                     Инструменты справки будут отвечать отказом (в сетевом режиме — 503)."
+                     Инструменты справки будут отвечать отказом."
                 );
-                None
+                Ok(Err(reason))
             }
         }
     } else {
-        unavailable_reason = Some(
+        Ok(Err(
             "platform_path не задан в config.toml (и не передан --platform-path): \
              укажите каталог установки 1С нужной версии, например \
              'C:\\Program Files\\1cv8\\8.3.27.2342'"
                 .to_string(),
-        );
-        None
-    };
-
-    match cli.transport {
-        Transport::Http => {
-            let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
-            let app = http::router(cfg.clone(), mcp, unavailable_reason);
-
-            let listener = tokio::net::TcpListener::bind(addr).await?;
-            info!(%addr, "listening");
-
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown_signal())
-                .await
-            {
-                error!(error = %e, "server stopped with error");
-                return Err(e.into());
-            }
-            info!("graceful shutdown complete");
-        }
-        Transport::Stdio => {
-            let server = match mcp {
-                Some(server) => server,
-                None => {
-                    let reason = unavailable_reason
-                        .unwrap_or_else(|| "платформенный индекс не загружен".to_string());
-                    tracing::warn!(%reason, "stdio: справка платформы недоступна");
-                    let mut server = mcp_server::BslContextServer::unavailable(
-                        reason,
-                        cfg.default_validation_level,
-                        cfg.default_profile,
-                    )
-                    .apply_tools_whitelist(&cfg.tools.enabled)
-                    .with_cli_platform_path(cli.platform_path.is_some());
-                    // Источники имён и путь к config.toml нужны и без индекса:
-                    // это инструменты обслуживания, ради которых режим и живёт.
-                    if let Some(slots) = source_slots.take() {
-                        server = server.with_sources(slots);
-                    }
-                    if let Some(path) = cli.config.clone() {
-                        server = server
-                            .with_config_path(path)
-                            .with_effective_config(cfg.clone());
-                    }
-                    server
-                }
-            };
-            serve_stdio(server).await?;
-        }
+        ))
     }
-    Ok(())
 }
 
 /// Потоковый режим: кадры MCP через стандартные ввод и вывод.
