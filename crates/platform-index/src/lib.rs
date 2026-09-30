@@ -8,6 +8,7 @@
 //! и `enum_values` системных перечислений заполняются полностью. У апстрима
 //! ([`upstream/.../persistent/storage/Mapper.kt`]) они теряются.
 
+pub mod cache;
 pub mod entities;
 pub mod format;
 pub mod loader;
@@ -16,6 +17,7 @@ pub mod search;
 pub mod storage;
 pub mod visitor;
 
+pub use cache::{load_cached, LoadSource};
 pub use entities::{
     Constructor, Definition, EnumValue, Method, Parameter, Property, Signature, Type,
 };

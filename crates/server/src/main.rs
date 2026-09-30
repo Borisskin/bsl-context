@@ -88,8 +88,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Загрузка индекса (Phase 4): если platform_path задан — eager build перед стартом
-    // HTTP. Парсинг hbk на 8.3.27 занимает ~5–7 сек, поэтому делаем синхронно через
-    // spawn_blocking, чтобы не блокировать tokio worker.
+    // HTTP. Сборка из hbk занимает секунды (замер на 8.3.27 после распараллеливания
+    // разбора — ~1,3 с), поэтому делаем её синхронно через spawn_blocking, чтобы не
+    // блокировать tokio worker. Готовый индекс пишется в дисковый кэш (см.
+    // `platform_cache_path`): повторный старт читает кэш вместо разбора (~0,09 с).
     let mcp = if let Some(platform_path) = cfg.platform_path.clone() {
         let hbk_candidates = [
             platform_path.join("shcntx_ru.hbk"),
@@ -98,11 +100,16 @@ async fn main() -> anyhow::Result<()> {
         match hbk_candidates.into_iter().find(|p| p.exists()) {
             Some(hbk) => {
                 info!(?hbk, "загрузка платформенного индекса");
-                let index =
-                    tokio::task::spawn_blocking(move || platform_index::load_from_hbk(&hbk))
-                        .await
-                        .map_err(|e| anyhow::anyhow!("задача загрузки индекса упала: {e}"))??;
+                let cache_path = cfg.platform_cache_path_effective();
+                let (index, loaded_from) = tokio::task::spawn_blocking(move || match cache_path {
+                    Some(cache_path) => platform_index::load_cached(&hbk, &cache_path),
+                    None => platform_index::load_from_hbk(&hbk)
+                        .map(|index| (index, platform_index::LoadSource::Hbk)),
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("задача загрузки индекса упала: {e}"))??;
                 info!(
+                    loaded_from = ?loaded_from,
                     types = index.types.len(),
                     enum_types = index.enum_types_count(),
                     global_methods = index.global_methods.len(),

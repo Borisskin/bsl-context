@@ -6,27 +6,61 @@
 //! 3. Найти каталоги типов → распарсить с `methods/properties/constructors`.
 //!
 //! Все типы (обычные и перечисления) складываются в одну `HashMap` по `name_ru`.
+//!
+//! Разбор страниц перечислений и типов распараллелен (rayon): это основная
+//! цена сборки — замер на 8.3.27 даёт ~2,3 с из ~3,5 с на одном потоке и
+//! ~0,5 с на двенадцати. Чтение страницы из zip требует `&mut HbkContent`,
+//! поэтому контент живёт под `Mutex`, а блокировка берётся на время ОДНОЙ
+//! страницы и снимается до разбора html (см. [`LockedSource`]) — иначе потоки
+//! выстроились бы в очередь на весь проход и распараллеливание не дало бы
+//! ничего. Ко входу в индекс результаты приходят в порядке TOC: вставка
+//! последовательная, чтобы содержимое вторичных карт (`types_en`) не зависело
+//! от планировщика.
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
+use hbk_parser::{EnumInfo, ObjectInfo};
 use hbk_reader::HbkContent;
+use rayon::prelude::*;
 use tracing::{info, warn};
 
 use crate::mapper::{method_from, property_from, type_from_enum, type_from_object};
 use crate::storage::PlatformIndex;
 use crate::visitor::{
     collect_global_methods, collect_global_properties, collect_root_pages, drill_down,
-    visit_enum_page, visit_type_page,
+    visit_enum_page, visit_type_page, HtmlSource,
 };
+
+/// `HbkContent` за блокировкой: параллельный разбор берёт её на чтение одной
+/// страницы. Всё остальное время потоки заняты разбором html и не мешают друг
+/// другу.
+struct LockedSource<'a, 'b>(&'a Mutex<&'b mut HbkContent>);
+
+impl HtmlSource for LockedSource<'_, '_> {
+    fn read_html(&mut self, html_path: &str) -> Option<String> {
+        let mut guard = self
+            .0
+            .lock()
+            .expect("блокировка HbkContent отравлена паникой потока");
+        guard.read_html(html_path)
+    }
+}
 
 /// Загрузить `PlatformIndex` из hbk-файла платформы.
 ///
 /// Принимает путь к `shcntx_ru.hbk`. Не разделяет файлы — всё в один проход.
 pub fn load_from_hbk(path: &Path) -> Result<PlatformIndex> {
     info!(?path, "загрузка платформенного контекста из hbk");
+    let t = Instant::now();
     let mut content = HbkContent::read(path)
         .map_err(|e| anyhow!("не удалось открыть hbk {}: {}", path.display(), e))?;
+    info!(
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        "[этап 1/4] контейнер и TOC hbk"
+    );
     build_index(&mut content).with_context(|| format!("сборка PlatformIndex из {}", path.display()))
 }
 
@@ -40,6 +74,7 @@ pub fn build_index(content: &mut HbkContent) -> Result<PlatformIndex> {
     let roots = collect_root_pages(&pages);
 
     if let Some(global) = roots.global_context {
+        let t = Instant::now();
         index.global_methods = collect_global_methods(content, global)
             .iter()
             .map(method_from)
@@ -48,31 +83,63 @@ pub fn build_index(content: &mut HbkContent) -> Result<PlatformIndex> {
             .iter()
             .map(property_from)
             .collect();
+        // Этапы пишутся в info один раз на сборку (старт или reboot кэша):
+        // по ним скрипт замера и журнал сервиса видят, где прошло время.
+        info!(
+            methods = index.global_methods.len(),
+            properties = index.global_properties.len(),
+            elapsed_ms = t.elapsed().as_millis() as u64,
+            "[этап 2/4] глобальный контекст"
+        );
     } else {
         warn!("раздел 'Global context' не найден в TOC — global_methods/global_properties пусты");
     }
 
+    // Дальше к контенту ходят несколько потоков. Единственная мутация внутри —
+    // чтение zip-entry, поэтому блокировки на одну страницу достаточно.
+    let content = Mutex::new(&mut *content);
+
     // Перечисления (типы с enum_values).
+    let t = Instant::now();
     let mut enum_pages = Vec::new();
     for root in &roots.enums {
         drill_down(root, &mut enum_pages);
     }
-    for page in enum_pages {
-        if let Some(info) = visit_enum_page(content, page) {
-            index.insert_type(type_from_enum(&info));
-        }
+    // `collect` у rayon сохраняет порядок исходной последовательности, поэтому
+    // вставка ниже идёт в порядке TOC независимо от планировщика.
+    let enum_infos: Vec<Option<EnumInfo>> = enum_pages
+        .par_iter()
+        .map(|page| visit_enum_page(&mut LockedSource(&content), page))
+        .collect();
+    for info in enum_infos.into_iter().flatten() {
+        index.insert_type(type_from_enum(&info));
     }
+    info!(
+        pages = enum_pages.len(),
+        types = index.types.len(),
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        "[этап 3/4] перечисления"
+    );
 
     // Обычные типы.
+    let t = Instant::now();
     let mut type_pages = Vec::new();
     for root in &roots.types {
         drill_down(root, &mut type_pages);
     }
-    for page in type_pages {
-        if let Some(info) = visit_type_page(content, page) {
-            index.insert_type(type_from_object(&info));
-        }
+    let type_infos: Vec<Option<ObjectInfo>> = type_pages
+        .par_iter()
+        .map(|page| visit_type_page(&mut LockedSource(&content), page))
+        .collect();
+    for info in type_infos.into_iter().flatten() {
+        index.insert_type(type_from_object(&info));
     }
+    info!(
+        pages = type_pages.len(),
+        types = index.types.len(),
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        "[этап 4/4] типы"
+    );
 
     info!(
         global_methods = index.global_methods.len(),

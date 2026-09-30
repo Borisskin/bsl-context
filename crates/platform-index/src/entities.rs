@@ -3,10 +3,10 @@
 //! Главное отличие от апстрима — поля `signature` у методов, `constructors` у типов
 //! и `enum_values` у типов-перечислений заполняются полностью, без потерь.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Метод платформы (глобальный или член типа).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Method {
     pub name_ru: String,
     pub name_en: String,
@@ -17,7 +17,7 @@ pub struct Method {
 }
 
 /// Перегрузка метода или конструктора.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
     pub name: String,
     pub description: String,
@@ -25,7 +25,7 @@ pub struct Signature {
 }
 
 /// Параметр метода/конструктора.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
     pub name: String,
     pub type_name: String,
@@ -34,7 +34,7 @@ pub struct Parameter {
 }
 
 /// Свойство (глобальное или член типа).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Property {
     pub name_ru: String,
     pub name_en: String,
@@ -44,7 +44,7 @@ pub struct Property {
 }
 
 /// Конструктор объекта (`Новый ТипX(...)`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Constructor {
     pub name: String,
     pub description: String,
@@ -52,7 +52,7 @@ pub struct Constructor {
 }
 
 /// Значение системного перечисления.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EnumValue {
     pub name_ru: String,
     pub name_en: String,
@@ -62,7 +62,7 @@ pub struct EnumValue {
 /// Тип платформы. Системное перечисление — это разновидность `Type` с непустым
 /// `enum_values` и пустыми `methods/properties/constructors`. Обычный тип —
 /// наоборот.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Type {
     pub name_ru: String,
     pub name_en: String,

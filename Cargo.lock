@@ -1556,8 +1556,11 @@ dependencies = [
  "anyhow",
  "hbk-parser",
  "hbk-reader",
+ "rayon",
  "regex",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
 ]

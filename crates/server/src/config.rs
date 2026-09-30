@@ -59,6 +59,20 @@ pub struct Config {
     /// порта разрешает любой порт этого хоста.
     pub allowed_hosts: Vec<String>,
 
+    /// Путь к файлу кэша собранного платформенного индекса.
+    ///
+    /// Разбор `shcntx_ru.hbk` занимает секунды на каждом старте — это холодный
+    /// старт сервера. Готовый индекс сохраняется на диск и при следующем
+    /// запуске читается без повторного разбора (см. `platform-index::cache`).
+    ///
+    /// - поле не задано — кэш включён, файл `<log_dir>/platform-index.cache`;
+    /// - пустая строка `""` — кэш выключен, индекс каждый раз собирается из hbk;
+    /// - иной путь — свой файл кэша (каталог создаётся при записи).
+    ///
+    /// Годность кэша проверяется отпечатком hbk и версией формата, поэтому
+    /// смена версии платформы или сервера пересобирает его автоматически.
+    pub platform_cache_path: Option<PathBuf>,
+
     /// Внешний источник имён методов конфигурации (см. крейт `symbol-source`).
     /// Нужен, чтобы `validate_module` не считал опиской вызовы процедур глобальных
     /// общих модулей и методов модуля объекта-владельца внешней обработки.
@@ -186,6 +200,7 @@ impl Default for Config {
                 "127.0.0.1".to_string(),
                 "::1".to_string(),
             ],
+            platform_cache_path: None,
             symbol_source: SymbolSourceConfig::default(),
             symbol_sources: Vec::new(),
             tools: ToolsConfig::default(),
@@ -194,6 +209,19 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Действующий путь кэша платформенного индекса: явный из конфига, иначе
+    /// `<log_dir>/platform-index.cache`. `None` — кэш выключен пустой строкой.
+    pub fn platform_cache_path_effective(&self) -> Option<PathBuf> {
+        match &self.platform_cache_path {
+            Some(p) if p.as_os_str().is_empty() => None,
+            Some(p) => Some(p.clone()),
+            None => Some(
+                self.log_dir
+                    .join(platform_index::cache::DEFAULT_CACHE_FILE_NAME),
+            ),
+        }
+    }
+
     /// Загрузить конфиг из файла, либо вернуть дефолт.
     pub fn load_or_default(path: Option<&Path>) -> anyhow::Result<Self> {
         let Some(path) = path else {
@@ -367,5 +395,32 @@ mod tests {
             ..cfg
         };
         assert_eq!(cfg.code_index_repo_effective(), Some("zup-prod"));
+    }
+
+    #[test]
+    fn cache_path_defaults_into_log_dir() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.platform_cache_path_effective(),
+            Some(
+                cfg.log_dir
+                    .join(platform_index::cache::DEFAULT_CACHE_FILE_NAME)
+            )
+        );
+    }
+
+    #[test]
+    fn cache_path_empty_disables_cache() {
+        let cfg: Config = toml::from_str("platform_cache_path = \"\"\n").unwrap();
+        assert_eq!(cfg.platform_cache_path_effective(), None);
+    }
+
+    #[test]
+    fn cache_path_explicit_wins() {
+        let cfg: Config = toml::from_str("platform_cache_path = 'C:/tmp/pc.cache'\n").unwrap();
+        assert_eq!(
+            cfg.platform_cache_path_effective(),
+            Some(PathBuf::from("C:/tmp/pc.cache"))
+        );
     }
 }
