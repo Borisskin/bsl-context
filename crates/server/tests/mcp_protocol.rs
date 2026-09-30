@@ -48,6 +48,7 @@ async fn all_tools_are_reachable_over_streamable_http() {
     let app = http::router(
         Config::default(),
         Some(BslContextServer::new(PlatformIndex::new())),
+        None,
     );
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -140,6 +141,53 @@ async fn all_tools_are_reachable_over_streamable_http() {
             "{name} returned no text content: {response}"
         );
     }
+
+    server.abort();
+}
+
+/// Без индекса `/mcp` отдаёт 503 с той же причиной, что потоковый клиент видит
+/// в описании сервера и в отказе инструмента: диагностика одна на оба транспорта.
+#[tokio::test(flavor = "multi_thread")]
+async fn placeholder_reports_the_same_reason() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback listener");
+    let address = listener.local_addr().expect("listener address");
+    let reason = "platform_path не задан для проверки";
+    let app = http::router(Config::default(), None, Some(reason.to_string()));
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("placeholder server failed");
+    });
+
+    let (status, body) = tokio::task::spawn_blocking({
+        let url = format!("http://{address}/mcp");
+        move || {
+            post_json(
+                &url,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "bsl-context-acceptance", "version": "1"}
+                    }
+                }),
+            )
+        }
+    })
+    .await
+    .expect("HTTP client task panicked");
+
+    assert_eq!(status, 503, "body: {body}");
+    assert!(
+        body.contains(reason),
+        "причина обязана быть названа: {body}"
+    );
+    assert!(body.contains("--platform-path"), "подсказка: {body}");
 
     server.abort();
 }
