@@ -63,7 +63,10 @@ fn tokenize(content: &str) -> Vec<Cow<'_, str>> {
 
     while let Some((i, ch)) = chars.next() {
         if ch == BOM {
-            // Как и раньше, BOM молча пропускается в любом месте потока.
+            // BOM перед токеном пропускается, как и раньше. Внутри токена он
+            // остаётся частью среза: данные платформы BOM в середине не содержат,
+            // а прежнее вырезание из середины строки/числа делало бы вид, что
+            // такой токен разобран верно.
             continue;
         }
         if in_string {
@@ -74,7 +77,7 @@ fn tokenize(content: &str) -> Vec<Cow<'_, str>> {
                     chars.next();
                 } else {
                     let end = i + ch.len_utf8();
-                    tokens.push(unescape_cow(&content[string_start..end], escaped));
+                    tokens.push(unescape_cow(&content[string_start..end], escaped, true));
                     in_string = false;
                 }
             }
@@ -113,7 +116,7 @@ fn tokenize(content: &str) -> Vec<Cow<'_, str>> {
     if in_string {
         // Данные оборвались внутри строки — токен от открывающей кавычки до
         // конца текста (это ожидает `parse_string`).
-        tokens.push(unescape_cow(&content[string_start..], escaped));
+        tokens.push(unescape_cow(&content[string_start..], escaped, false));
     } else if let Some(start) = atom_start {
         tokens.push(Cow::Borrowed(&content[start..]));
     }
@@ -121,12 +124,27 @@ fn tokenize(content: &str) -> Vec<Cow<'_, str>> {
 }
 
 /// Развернуть `""` в одну кавычку; без экранирования срез отдаётся как есть.
-fn unescape_cow<'a>(raw: &'a str, escaped: bool) -> Cow<'a, str> {
-    if escaped {
-        Cow::Owned(raw.replace("\"\"", "\""))
-    } else {
-        Cow::Borrowed(raw)
+///
+/// Пары выравниваются внутри СОДЕРЖИМОГО строки, а не от начала среза:
+/// `raw.replace("\"\"", …)` от нулевого байта склеивал обрамляющую кавычку с
+/// первой экранированной (`""""` — это строка из одной экранированной кавычки),
+/// из-за чего `parse_string` отдавал не то, что прежде. `closed` отличает
+/// закрытую строку (обе кавычки — обрамление) от оборванной в конце данных
+/// (обрамление только открывающее).
+fn unescape_cow<'a>(raw: &'a str, escaped: bool, closed: bool) -> Cow<'a, str> {
+    if !escaped {
+        return Cow::Borrowed(raw);
     }
+    let inner_end = if closed { raw.len() - 1 } else { raw.len() };
+    let inner = &raw[1..inner_end];
+    let unescaped = inner.replace("\"\"", "\"");
+    let mut out = String::with_capacity(raw.len());
+    out.push('"');
+    out.push_str(&unescaped);
+    if closed {
+        out.push('"');
+    }
+    Cow::Owned(out)
 }
 
 // ============================================================================
@@ -407,6 +425,25 @@ mod tests {
         let toks = tokenize(r#"{"ru" "Имя""с""кавычками"}"#);
         // экранирование "" → одиночная кавычка внутри строки
         assert_eq!(toks, vec!["{", "\"ru\"", "\"Имя\"с\"кавычками\"", "}"]);
+    }
+
+    /// Строка из одних экранированных кавычек: обрамление не должно попадать в
+    /// пару при разворачивании `""` (регресс: `""""` — строка из одной
+    /// экранированной кавычки — читалось как пустая строка).
+    #[test]
+    fn tokenize_only_escaped_quotes() {
+        assert_eq!(tokenize("\"\"\"\""), vec!["\"\"\""]);
+        assert_eq!(tokenize("\"\"\"\"\"\""), vec!["\"\"\"\""]);
+    }
+
+    /// Обрыв данных: незакрытая строка отдаётся сырым срезом от открывающей
+    /// кавычки (одиночная `"` в конце — токен из одного символа, `parse_string`
+    /// такой отвергает, не паникуя); пары внутри оборванной строки развёрнуты.
+    #[test]
+    fn tokenize_unclosed_string_is_raw_slice() {
+        assert_eq!(tokenize("\"Имя"), vec!["\"Имя"]);
+        assert_eq!(tokenize("\""), vec!["\""]);
+        assert_eq!(tokenize("\"\"\""), vec!["\"\""]);
     }
 
     #[test]

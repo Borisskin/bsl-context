@@ -67,6 +67,11 @@ async fn collect_responses(srv: &BslContextServer) -> Vec<(&'static str, String)
         }))
         .await,
     ));
+    // ВАЖНО для новых кейсов: многословные и беспрефиксные запросы уходят в
+    // ветки `search`, итерирующие `HashMap` (word-order, подстрока) — порядок
+    // выдачи между запусками случаен. Такие запросы в эталоны добавлять нельзя,
+    // пока результаты не отсортированы; здешние однословные идут по BTreeMap и
+    // стабильны.
     out.push((
         "search_array_en",
         srv.search(Parameters(SearchParams {
@@ -228,7 +233,9 @@ fn find_hbk(root: &Path) -> Option<PathBuf> {
 }
 
 fn update_mode() -> bool {
-    std::env::var("BSL_CONTEXT_UPDATE_GOLDEN").is_ok()
+    // Строго «1»: `BSL_CONTEXT_UPDATE_GOLDEN=0` не должен молча переписывать
+    // эталоны и «проходить» вместо сверки.
+    std::env::var("BSL_CONTEXT_UPDATE_GOLDEN").is_ok_and(|value| value == "1")
 }
 
 /// Первая разошедшаяся строка — этого достаточно, чтобы понять регрессию,
@@ -270,11 +277,15 @@ fn check_responses(dir: &Path, responses: Vec<(&'static str, String)>) {
         match fs::read_to_string(&path) {
             Ok(expected) => {
                 let expected = expected.replace("\r\n", "\n");
+                // Хвостовые переводы строк не значимы: правка эталона
+                // редактором не должна выглядеть регрессией ответа.
+                let expected = expected.trim_end_matches('\n');
+                let actual = actual.trim_end_matches('\n');
                 if expected != actual {
                     failures.push(format!(
                         "{name}: ответ разошёлся с эталоном {}\n{}",
                         path.display(),
-                        first_difference(&expected, &actual)
+                        first_difference(expected, actual)
                     ));
                 }
             }
