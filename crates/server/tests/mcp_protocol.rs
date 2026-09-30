@@ -47,8 +47,7 @@ async fn all_tools_are_reachable_over_streamable_http() {
     let address = listener.local_addr().expect("listener address");
     let app = http::router(
         Config::default(),
-        Some(BslContextServer::new(PlatformIndex::new())),
-        None,
+        BslContextServer::new(PlatformIndex::new()),
     );
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -75,6 +74,18 @@ async fn all_tools_are_reachable_over_streamable_http() {
         initialize.pointer("/result/serverInfo/name"),
         Some(&json!("bsl-context-rs"))
     );
+
+    let health = tokio::task::spawn_blocking(move || {
+        let response = ureq::get(&format!("http://{address}/health"))
+            .call()
+            .expect("health request failed");
+        assert_eq!(response.status(), 200);
+        response.into_json::<Value>().expect("health JSON")
+    })
+    .await
+    .expect("HTTP client task panicked");
+    assert_eq!(health["index_loaded"], json!(true));
+    assert!(health.get("unavailable_reason").is_none());
 
     let listed = rpc(
         url.clone(),
@@ -145,49 +156,113 @@ async fn all_tools_are_reachable_over_streamable_http() {
     server.abort();
 }
 
-/// Без индекса `/mcp` отдаёт 503 с той же причиной, что потоковый клиент видит
-/// в описании сервера и в отказе инструмента: диагностика одна на оба транспорта.
+/// Без индекса HTTP выполняет рукопожатие и обслуживает служебные инструменты,
+/// а справочные отвечают отказом с той же причиной, что видна в /health.
 #[tokio::test(flavor = "multi_thread")]
-async fn placeholder_reports_the_same_reason() {
+async fn unavailable_server_over_http_serves_maintenance_tools() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind loopback listener");
     let address = listener.local_addr().expect("listener address");
     let reason = "platform_path не задан для проверки";
-    let app = http::router(Config::default(), None, Some(reason.to_string()));
+    let cfg = Config::default();
+    let mcp = BslContextServer::unavailable(
+        reason.into(),
+        cfg.default_validation_level,
+        cfg.default_profile,
+    );
+    let app = http::router(cfg, mcp);
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
-            .expect("placeholder server failed");
+            .expect("acceptance server failed");
     });
+    let url = format!("http://{address}/mcp");
+    let initialize = rpc(
+        url.clone(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "bsl-context-acceptance", "version": "1"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        initialize.pointer("/result/serverInfo/name"),
+        Some(&json!("bsl-context-rs"))
+    );
+    assert!(initialize["result"]["instructions"]
+        .as_str()
+        .expect("server instructions")
+        .contains(reason));
 
-    let (status, body) = tokio::task::spawn_blocking({
-        let url = format!("http://{address}/mcp");
-        move || {
-            post_json(
-                &url,
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-06-18",
-                        "capabilities": {},
-                        "clientInfo": {"name": "bsl-context-acceptance", "version": "1"}
-                    }
-                }),
-            )
-        }
+    let listed = rpc(
+        url.clone(),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    )
+    .await;
+    assert_eq!(
+        listed["result"]["tools"]
+            .as_array()
+            .expect("tools/list result")
+            .len(),
+        14
+    );
+
+    let search = rpc(
+        url.clone(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "search", "arguments": {"query": "Строка"}}
+        }),
+    )
+    .await;
+    assert_eq!(search.pointer("/result/isError"), Some(&json!(true)));
+    assert!(search
+        .pointer("/result/content/0/text")
+        .and_then(Value::as_str)
+        .expect("search error text")
+        .contains(reason));
+
+    let status = rpc(
+        url,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {"name": "symbol_sources_status", "arguments": {}}
+        }),
+    )
+    .await;
+    assert!(status.get("error").is_none(), "JSON-RPC error: {status}");
+    assert!(
+        status.pointer("/result/isError").is_none()
+            || status.pointer("/result/isError") == Some(&json!(false)),
+        "maintenance tool failed: {status}"
+    );
+
+    let health = tokio::task::spawn_blocking(move || {
+        let response = ureq::get(&format!("http://{address}/health"))
+            .call()
+            .expect("health request failed");
+        assert_eq!(response.status(), 200);
+        response.into_json::<Value>().expect("health JSON")
     })
     .await
     .expect("HTTP client task panicked");
-
-    assert_eq!(status, 503, "body: {body}");
-    assert!(
-        body.contains(reason),
-        "причина обязана быть названа: {body}"
-    );
-    assert!(body.contains("--platform-path"), "подсказка: {body}");
+    assert_eq!(health["index_loaded"], json!(false));
+    assert!(health["unavailable_reason"]
+        .as_str()
+        .expect("reason")
+        .contains(reason));
+    assert!(health.get("index_stats").is_none());
 
     server.abort();
 }

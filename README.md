@@ -209,8 +209,10 @@ Inside that directory it looks for `shcntx_ru.hbk` at two paths:
 
 This is deliberate: method signatures and the set of system enumerations differ
 between platform versions, so code must be validated against the version it is
-written for. If `platform_path` is unset, the server starts and `/health`
-responds, but the MCP tools return `503` with a hint to set the path.
+written for. If `platform_path` is unset or the `hbk` is missing, the server starts
+in both modes: the handshake and tool listing work, help tools return an error
+with the reason, and maintenance tools keep working. In network mode, `/health`
+reports `index_loaded: false` and the reason in `unavailable_reason`.
 
 ### Platform index cache
 
@@ -401,10 +403,13 @@ bsl-context-rs --transport stdio --platform-path 'C:\Program Files\1cv8\8.3.27.1
 ```
 
 `--platform-path` overrides `platform_path` from config.toml and allows starting
-without a config file. If the platform is not set or the `hbk` is missing, the server
-still starts: help tools answer with a clear refusal, while `reload_config`,
+without a config file. In both transport modes, if the platform is not set or the
+`hbk` is missing, the server still starts: the handshake and tool listing work,
+help tools return an error with the reason, while `reload_config`,
 `symbol_sources_status`, `reconnect_symbol_source` and `rebuild_symbol_index` keep
-working. Prefer absolute paths in config.toml: the client, not the server, sets the
+working subject to the `[tools].enabled` whitelist. In network mode, `/health`
+also reports the reason in `unavailable_reason`.
+Prefer absolute paths in config.toml: the client, not the server, sets the
 working directory.
 
 ## MCP tools
@@ -463,7 +468,9 @@ Two notes for stream mode: the `Host` header filter (`allowed_hosts`) does not a
 there is no network listener; several client sessions are several processes, so their
 records in the shared log file may interleave. Input is strict: a line that is not a
 protocol frame terminates the session — that is almost always a client misconfiguration,
-not a server problem.
+not a server problem. On Windows `rebuild_symbol_index` cannot replace a lite database
+that another session or the service holds open: the call is refused with that reason and
+the current database keeps working — rebuild once the other process has exited.
 
 ## Changelog
 

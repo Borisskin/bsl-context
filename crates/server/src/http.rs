@@ -1,22 +1,16 @@
 //! HTTP-роутер: /health (для healthcheck-обёртки супервизора) и /mcp
-//! (Streamable-HTTP MCP, если индекс загружен — иначе 503-заглушка).
+//! (всегда Streamable HTTP; без индекса справочные инструменты отвечают отказом).
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::{IntoResponse, Json},
-    routing::{get, post},
-    Router,
-};
+use axum::{extract::State, response::Json, routing::get, Router};
 use rmcp::transport::streamable_http_server::{
     session::never::NeverSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use serde::Serialize;
 
 use crate::config::Config;
-use crate::mcp_server::{BslContextServer, SourceMapHandle};
+use crate::mcp_server::BslContextServer;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -24,16 +18,9 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// Краткая статистика индекса для /health (заполнена, если индекс загружен).
     pub index_stats: Option<IndexStats>,
-    /// Именованные источники имён конфигураций: describe() каждого читается на
-    /// каждый /health, потому что `rebuild_symbol_index` подменяет источник на
-    /// ходу, а `reload_config` перечитывает config.toml и подменяет карту целиком.
-    /// Поэтому держим handle, а не снимок — иначе health показывал бы состояние на
-    /// момент старта. Пустая карта — сервера без источников или без индекса вообще.
-    sources: SourceMapHandle,
-    /// Причина, по которой платформенный индекс не загружен, — для 503-заглушки
-    /// `/mcp`. Та же формулировка уходит stdio-клиенту: диагностика одна на оба
-    /// транспорта. `None` — индекс загружен.
-    unavailable_reason: Option<String>,
+    /// Сервер хранит состояние индекса и актуальную карту источников имён:
+    /// /health берёт снимок карты на каждый запрос, включая работу без индекса.
+    server: BslContextServer,
 }
 
 #[derive(Clone, Serialize)]
@@ -54,6 +41,9 @@ struct HealthResponse {
     platform_path: Option<String>,
     /// `true`, если индекс платформы успешно загружен.
     index_loaded: bool,
+    /// Причина недоступности платформенного индекса, если он не загружен.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable_reason: Option<String>,
     /// Статистика индекса (когда `index_loaded == true`).
     #[serde(skip_serializing_if = "Option::is_none")]
     index_stats: Option<IndexStats>,
@@ -65,49 +55,38 @@ struct HealthResponse {
     symbol_sources: std::collections::BTreeMap<String, String>,
 }
 
-/// Собрать роутер: /health всегда + /mcp (рабочий или 503-заглушка).
-pub fn router(
-    config: Config,
-    mcp: Option<BslContextServer>,
-    unavailable_reason: Option<String>,
-) -> Router {
+/// Собрать роутер: /health и /mcp через Streamable HTTP при любом состоянии индекса.
+pub fn router(config: Config, server: BslContextServer) -> Router {
     // Список разрешённых Host для /mcp (защита rmcp от DNS-rebinding). Клонируем
     // до перемещения config в AppState.
     let allowed_hosts = config.allowed_hosts.clone();
-    let index_stats = mcp.as_ref().map(|s| IndexStats {
-        global_methods: s.index.global_methods.len(),
-        global_properties: s.index.global_properties.len(),
-        types: s.index.types.len(),
-        enum_types: s.index.enum_types_count(),
+    let index_stats = server.index_loaded().then(|| IndexStats {
+        global_methods: server.index.global_methods.len(),
+        global_properties: server.index.global_properties.len(),
+        types: server.index.types.len(),
+        enum_types: server.index.enum_types_count(),
     });
-    let sources = mcp.as_ref().map(|s| s.sources_handle()).unwrap_or_default();
 
     let state = AppState {
         config: Arc::new(config),
         started_at: chrono::Utc::now(),
         index_stats,
-        sources,
-        unavailable_reason,
+        server: server.clone(),
     };
 
-    let mut router = Router::new().route("/health", get(health));
-
-    if let Some(server) = mcp {
-        // Stateless Streamable HTTP — устраняет 404 Session not found при
-        // рестарте сервера (см. карточку #1184 для mcp-cache-ci v0.3.0).
-        let session_manager = Arc::new(NeverSessionManager::default());
-        let service_factory = move || Ok(server.clone());
-        let http_config = StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
-            .with_json_response(true)
-            .with_allowed_hosts(allowed_hosts);
-        let http_service =
-            StreamableHttpService::new(service_factory, session_manager, http_config);
-        router = router.nest_service("/mcp", http_service);
-    } else {
-        router = router.route("/mcp", post(mcp_placeholder));
-    }
-    router.with_state(state)
+    // Stateless Streamable HTTP — устраняет 404 Session not found при
+    // рестарте сервера (см. карточку #1184 для mcp-cache-ci v0.3.0).
+    let session_manager = Arc::new(NeverSessionManager::default());
+    let service_factory = move || Ok(server.clone());
+    let http_config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true)
+        .with_allowed_hosts(allowed_hosts);
+    let http_service = StreamableHttpService::new(service_factory, session_manager, http_config);
+    Router::new()
+        .route("/health", get(health))
+        .nest_service("/mcp", http_service)
+        .with_state(state)
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -116,7 +95,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let mut symbol_sources = std::collections::BTreeMap::new();
     // Снимок карты берём и сразу отпускаем std-блокировку: ниже в цикле `await`,
     // а std::sync-блокировка не должна переживать его.
-    let sources = state.sources.read().unwrap().clone();
+    let sources = state.server.sources_snapshot();
     for (name, slot) in sources.iter() {
         let status = slot
             .source
@@ -137,27 +116,10 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
             .platform_path
             .as_ref()
             .map(|p| p.display().to_string()),
-        index_loaded: state.index_stats.is_some(),
+        index_loaded: state.server.index_loaded(),
+        unavailable_reason: state.server.unavailable_reason().map(str::to_string),
         index_stats: state.index_stats.clone(),
         default_validation_level: state.config.default_validation_level,
         symbol_sources,
     })
-}
-
-/// Заглушка MCP-эндпоинта: возвращается, когда `platform_path` не задан или
-/// `hbk` не найден и индекс не загружен. Это сигнал оператору: указать
-/// платформу и перезапустить сервис. Текст причины — тот же, что увидел бы
-/// stdio-клиент.
-async fn mcp_placeholder(State(state): State<AppState>) -> impl IntoResponse {
-    let reason = state
-        .unavailable_reason
-        .clone()
-        .unwrap_or_else(|| "платформенный контекст не загружен".to_string());
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "error": format!("MCP недоступен: {reason}"),
-            "hint": "platform_path задаётся в config.toml или опцией --platform-path; после правки перезапустите сервер."
-        })),
-    )
 }
