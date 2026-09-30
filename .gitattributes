@@ -1,0 +1,4 @@
+# Эталоны ответов инструментов пишет тест (BSL_CONTEXT_UPDATE_GOLDEN=1) всегда с LF.
+# Без этого правила на Windows с core.autocrlf=true рабочая копия получает CRLF,
+# и после обновления эталонов git показывает изменёнными все многострочные файлы.
+crates/server/tests/golden/** text eol=lf
