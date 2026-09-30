@@ -4,9 +4,33 @@
 //! На вход — html-фрагмент главы, на выход — структурированное значение.
 
 use scraper::{Html, Selector};
+use std::sync::OnceLock;
 
 use crate::html::{collapse_whitespace, extract_text, to_markdown};
 use crate::models::{MethodParameterInfo, RelatedObject, ValueInfo};
+
+/// Селекторы блоков — статические. `Selector::parse` компилирует CSS-строку при
+/// каждом вызове, а парсеры блоков зовутся на каждую страницу справки (десятки
+/// тысяч раз за сборку). Компиляция не зависит от содержимого страницы.
+fn heading_selector() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("p.V8SH_heading").expect("V8SH_heading selector"))
+}
+
+fn title_selector() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("p.V8SH_title").expect("V8SH_title selector"))
+}
+
+fn anchor_selector() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("a").expect("a selector"))
+}
+
+fn rubric_selector() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("div.V8SH_rubric").expect("V8SH_rubric selector"))
+}
 
 // Регулярка из BlockHandler.kt: NAMES_PATTERN.
 // Шаблон вида "RuName(EnName)" — извлекает русское и английское имя.
@@ -40,15 +64,13 @@ fn split_dual_name(text: &str) -> (String, String) {
 /// Порт `NameBlockHandler` из `BlockHandler.kt`.
 pub fn parse_head_name(html: &str) -> (String, String) {
     let doc = Html::parse_fragment(html);
-    let heading_sel = Selector::parse("p.V8SH_heading").expect("V8SH_heading selector");
-    let title_sel = Selector::parse("p.V8SH_title").expect("V8SH_title selector");
 
     let raw = doc
-        .select(&heading_sel)
+        .select(heading_selector())
         .next()
         .map(|el| el.text().collect::<String>())
         .or_else(|| {
-            doc.select(&title_sel)
+            doc.select(title_selector())
                 .next()
                 .map(|el| el.text().collect::<String>())
         })
@@ -98,9 +120,8 @@ fn extract_text_keep_breaks(html: &str) -> String {
 /// `v8help://` ссылки сохраняем как есть (используется консьюмерами).
 pub fn parse_related_objects(body_html: &str) -> Vec<RelatedObject> {
     let doc = Html::parse_fragment(body_html);
-    let a_sel = Selector::parse("a").expect("a selector");
     let mut out = Vec::new();
-    for a in doc.select(&a_sel) {
+    for a in doc.select(anchor_selector()) {
         let text_raw: String = a.text().collect();
         let text = collapse_whitespace(text_raw.trim().replace(" ,", ",").as_str());
         let href = a.value().attr("href").unwrap_or("").to_string();
@@ -179,10 +200,9 @@ pub fn parse_parameters(body_html: &str) -> Vec<MethodParameterInfo> {
     // для каждого rubric извлекаем имя и optional, тип/описание берём из текста
     // до следующего rubric (в простом случае).
     let doc = Html::parse_fragment(body_html);
-    let rubric_sel = Selector::parse("div.V8SH_rubric").expect("V8SH_rubric selector");
 
     let mut params = Vec::new();
-    for rubric in doc.select(&rubric_sel) {
+    for rubric in doc.select(rubric_selector()) {
         let raw: String = rubric.text().collect();
         let text = collapse_whitespace(raw.trim());
         if text.is_empty() {

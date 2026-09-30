@@ -1,0 +1,21 @@
+{
+  "valid": false,
+  "tree_parsed": true,
+  "symbols_available": true,
+  "errors": [
+    {
+      "line": 2,
+      "col": 15,
+      "kind": "unknown_new_type",
+      "message": "Тип 'НетТакогоТипа' не найден в платформенном контексте (Новый 'НетТакогоТипа').",
+      "confidence": "low"
+    },
+    {
+      "line": 3,
+      "col": 5,
+      "kind": "undeclared_method",
+      "message": "Метод 'Сообщить' не объявлен в этом модуле и не найден в платформенном контексте.",
+      "confidence": "high"
+    }
+  ]
+}

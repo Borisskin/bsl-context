@@ -5,6 +5,16 @@
 
 use ego_tree::NodeRef;
 use scraper::{Html, Node, Selector};
+use std::sync::OnceLock;
+
+/// Селектор `<body>` — статический: `Selector::parse` компилирует CSS-строку
+/// заново, а `split_chapters` зовётся на каждую страницу справки (десятки тысяч
+/// раз за сборку). Компиляция здесь не зависит от страницы, поэтому считается
+/// один раз на процесс.
+fn body_selector() -> &'static Selector {
+    static SEL: OnceLock<Selector> = OnceLock::new();
+    SEL.get_or_init(|| Selector::parse("body").expect("body selector"))
+}
 
 /// Глава html-страницы. Между двумя маркерами идёт «тело» главы — series of
 /// верхнеуровневых элементов в DOM. Сохраняем их как html-фрагмент, чтобы
@@ -29,8 +39,7 @@ pub struct Chapter {
 pub fn split_chapters(html: &str) -> Vec<Chapter> {
     let doc = Html::parse_document(html);
     // Парсер scraper всегда оборачивает в <html><head>/<body>; берём body.
-    let body_sel = Selector::parse("body").expect("body selector");
-    let body = match doc.select(&body_sel).next() {
+    let body = match doc.select(body_selector()).next() {
         Some(b) => b,
         None => return Vec::new(),
     };
