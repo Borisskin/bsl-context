@@ -111,7 +111,7 @@ pub struct BslContextServer {
     pub index: Arc<PlatformIndex>,
     pub engine: Arc<SearchEngine>,
     /// Дефолтный уровень валидации, если клиент не передал `level` в `validate_module`.
-    /// Берётся из `config.toml` (поле `default_validation_level`), кламп в `[1..=2]`.
+    /// Берётся из `config.toml` (поле `default_validation_level`), кламп в `[1..=3]`.
     pub default_validation_level: u8,
     /// Дефолтный профиль потребителя, если клиент не передал `profile`
     /// в `validate_module`. Берётся из `config.toml` (поле `default_profile`).
