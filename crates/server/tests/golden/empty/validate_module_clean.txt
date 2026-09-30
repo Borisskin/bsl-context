@@ -1,0 +1,14 @@
+{
+  "valid": false,
+  "tree_parsed": true,
+  "symbols_available": true,
+  "errors": [
+    {
+      "line": 2,
+      "col": 5,
+      "kind": "undeclared_method",
+      "message": "Метод 'Сообщить' не объявлен в этом модуле и не найден в платформенном контексте.",
+      "confidence": "high"
+    }
+  ]
+}
