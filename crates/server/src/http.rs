@@ -30,6 +30,10 @@ pub struct AppState {
     /// Поэтому держим handle, а не снимок — иначе health показывал бы состояние на
     /// момент старта. Пустая карта — сервера без источников или без индекса вообще.
     sources: SourceMapHandle,
+    /// Причина, по которой платформенный индекс не загружен, — для 503-заглушки
+    /// `/mcp`. Та же формулировка уходит stdio-клиенту: диагностика одна на оба
+    /// транспорта. `None` — индекс загружен.
+    unavailable_reason: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -62,7 +66,11 @@ struct HealthResponse {
 }
 
 /// Собрать роутер: /health всегда + /mcp (рабочий или 503-заглушка).
-pub fn router(config: Config, mcp: Option<BslContextServer>) -> Router {
+pub fn router(
+    config: Config,
+    mcp: Option<BslContextServer>,
+    unavailable_reason: Option<String>,
+) -> Router {
     // Список разрешённых Host для /mcp (защита rmcp от DNS-rebinding). Клонируем
     // до перемещения config в AppState.
     let allowed_hosts = config.allowed_hosts.clone();
@@ -79,11 +87,10 @@ pub fn router(config: Config, mcp: Option<BslContextServer>) -> Router {
         started_at: chrono::Utc::now(),
         index_stats,
         sources,
+        unavailable_reason,
     };
 
-    let mut router = Router::new()
-        .route("/health", get(health))
-        .with_state(state);
+    let mut router = Router::new().route("/health", get(health));
 
     if let Some(server) = mcp {
         // Stateless Streamable HTTP — устраняет 404 Session not found при
@@ -100,7 +107,7 @@ pub fn router(config: Config, mcp: Option<BslContextServer>) -> Router {
     } else {
         router = router.route("/mcp", post(mcp_placeholder));
     }
-    router
+    router.with_state(state)
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -137,15 +144,20 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-/// Заглушка MCP-эндпоинта: возвращается, когда `platform_path` не задан и
-/// индекс не загружен. Это сигнал оператору: указать платформу в config.toml
-/// и перезапустить сервис.
-async fn mcp_placeholder() -> impl IntoResponse {
+/// Заглушка MCP-эндпоинта: возвращается, когда `platform_path` не задан или
+/// `hbk` не найден и индекс не загружен. Это сигнал оператору: указать
+/// платформу и перезапустить сервис. Текст причины — тот же, что увидел бы
+/// stdio-клиент.
+async fn mcp_placeholder(State(state): State<AppState>) -> impl IntoResponse {
+    let reason = state
+        .unavailable_reason
+        .clone()
+        .unwrap_or_else(|| "платформенный контекст не загружен".to_string());
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
-            "error": "MCP недоступен: платформенный контекст не загружен.",
-            "hint": "Укажите platform_path в config.toml (например, 'C:\\Program Files\\1cv8\\8.3.27.1786') и перезапустите сервис."
+            "error": format!("MCP недоступен: {reason}"),
+            "hint": "platform_path задаётся в config.toml или опцией --platform-path; после правки перезапустите сервер."
         })),
     )
 }

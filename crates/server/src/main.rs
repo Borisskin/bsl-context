@@ -102,22 +102,23 @@ async fn main() -> anyhow::Result<()> {
     // Источники имён конфигураций (по одному на конфигурацию, у каждого свой способ
     // доступа). Ошибка создания конкретного источника не валит сервер: предупреждение
     // в лог, валидация по этой конфигурации пойдёт без знания её имён.
-    let source_slots: Vec<_> = cfg
-        .resolved_symbol_sources()?
-        .into_iter()
-        .map(|(name, sc)| {
-            let built = build_symbol_source(&sc);
-            if let Err(msg) = &built {
-                // Причину надо и в журнал, и в слот: инструмент
-                // symbol_sources_status отдаёт её вызывающему, не заставляя
-                // читать логи сервера.
-                error!(source = %name, error = %msg, "источник имён конфигурации не подключён");
-            }
-            (name, sc, built)
-        })
-        .collect();
+    let mut source_slots = Some(
+        cfg.resolved_symbol_sources()?
+            .into_iter()
+            .map(|(name, sc)| {
+                let built = build_symbol_source(&sc);
+                if let Err(msg) = &built {
+                    // Причину надо и в журнал, и в слот: инструмент
+                    // symbol_sources_status отдаёт её вызывающему, не заставляя
+                    // читать логи сервера.
+                    error!(source = %name, error = %msg, "источник имён конфигурации не подключён");
+                }
+                (name, sc, built)
+            })
+            .collect::<Vec<_>>(),
+    );
     info!(
-        sources = ?source_slots.iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(),
+        sources = ?source_slots.as_ref().expect("слоты только что собраны").iter().map(|(n, _, _)| n.as_str()).collect::<Vec<_>>(),
         "конфигурации, доступные параметру repo"
     );
 
@@ -155,13 +156,17 @@ async fn main() -> anyhow::Result<()> {
                     global_properties = index.global_properties.len(),
                     "PlatformIndex загружен"
                 );
+                let slots = source_slots
+                    .take()
+                    .expect("слоты источников передаются серверу один раз");
                 let mut server = mcp_server::BslContextServer::with_defaults(
                     index,
                     cfg.default_validation_level,
                     cfg.default_profile,
                 )
-                .with_sources(source_slots)
-                .apply_tools_whitelist(&cfg.tools.enabled);
+                .with_sources(slots)
+                .apply_tools_whitelist(&cfg.tools.enabled)
+                .with_cli_platform_path(cli.platform_path.is_some());
                 // Путь нужен инструменту reload_config: без него перечитывать
                 // config.toml нечего, и вызов честно отвечает отказом.
                 if let Some(path) = cli.config.clone() {
@@ -197,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.transport {
         Transport::Http => {
             let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
-            let app = http::router(cfg.clone(), mcp);
+            let app = http::router(cfg.clone(), mcp, unavailable_reason);
 
             let listener = tokio::net::TcpListener::bind(addr).await?;
             info!(%addr, "listening");
@@ -218,9 +223,18 @@ async fn main() -> anyhow::Result<()> {
                     let reason = unavailable_reason
                         .unwrap_or_else(|| "платформенный индекс не загружен".to_string());
                     tracing::warn!(%reason, "stdio: справка платформы недоступна");
-                    let mut server = mcp_server::BslContextServer::unavailable(reason);
-                    // Путь к config.toml нужен и в этом режиме: reload_config —
-                    // один из инструментов, работающих без индекса.
+                    let mut server = mcp_server::BslContextServer::unavailable(
+                        reason,
+                        cfg.default_validation_level,
+                        cfg.default_profile,
+                    )
+                    .apply_tools_whitelist(&cfg.tools.enabled)
+                    .with_cli_platform_path(cli.platform_path.is_some());
+                    // Источники имён и путь к config.toml нужны и без индекса:
+                    // это инструменты обслуживания, ради которых режим и живёт.
+                    if let Some(slots) = source_slots.take() {
+                        server = server.with_sources(slots);
+                    }
                     if let Some(path) = cli.config.clone() {
                         server = server
                             .with_config_path(path)

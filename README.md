@@ -461,7 +461,9 @@ Stream mode — the client spawns the process:
 
 Two notes for stream mode: the `Host` header filter (`allowed_hosts`) does not apply —
 there is no network listener; several client sessions are several processes, so their
-records in the shared log file may interleave.
+records in the shared log file may interleave. Input is strict: a line that is not a
+protocol frame terminates the session — that is almost always a client misconfiguration,
+not a server problem.
 
 ## Changelog
 

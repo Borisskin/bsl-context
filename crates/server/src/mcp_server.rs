@@ -138,6 +138,10 @@ pub struct BslContextServer {
     /// индекс-зависимые инструменты отвечают отказом с этой причиной, а
     /// инструменты обслуживания (перечитка конфига, источники имён) работают.
     unavailable_reason: Option<Arc<str>>,
+    /// `platform_path` пришёл из опции командной строки и перекрывает значение
+    /// файла: при перечитке config.toml это поле не сравнивается — файл всё
+    /// равно не может его изменить.
+    platform_path_from_cli: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -186,6 +190,7 @@ impl BslContextServer {
             cold_baseline: Arc::new(std::sync::Mutex::new(None)),
             allowed_tools: None,
             unavailable_reason: None,
+            platform_path_from_cli: false,
             tool_router: Self::tool_router(),
         }
     }
@@ -194,8 +199,16 @@ impl BslContextServer {
     /// найден. Рукопожатие и `tools/list` работают — клиент видит инструменты
     /// и причину в `instructions`, — а вызов справочного инструмента получает
     /// понятный отказ вместо ложного «ничего не найдено» на пустом индексе.
-    pub fn unavailable(reason: String) -> Self {
-        let mut server = Self::with_defaults(PlatformIndex::new(), 1, Profile::Full);
+    pub fn unavailable(
+        reason: String,
+        default_validation_level: u8,
+        default_profile: Profile,
+    ) -> Self {
+        let mut server = Self::with_defaults(
+            PlatformIndex::new(),
+            default_validation_level,
+            default_profile,
+        );
         server.unavailable_reason = Some(Arc::from(reason));
         server
     }
@@ -265,6 +278,14 @@ impl BslContextServer {
         self
     }
 
+    /// Отметить, что `platform_path` пришёл из опции командной строки и
+    /// перекрывает значение файла: при перечитке config.toml это поле не
+    /// сравнивается — файл всё равно не может его изменить.
+    pub fn with_cli_platform_path(mut self, from_cli: bool) -> Self {
+        self.platform_path_from_cli = from_cli;
+        self
+    }
+
     /// Предупредить об изменении полей, которые перечитка не применяет: платформа,
     /// адрес, порт и белый список инструментов прочитаны на старте, дефолты проверки
     /// зашиты в сервер. Снимок после сравнения заменяется свежим, иначе одно и то же
@@ -276,7 +297,10 @@ impl BslContextServer {
         };
         let Some(prev) = prev else { return };
         let changed = [
-            ("platform_path", prev.platform_path != fresh.platform_path),
+            (
+                "platform_path",
+                !self.platform_path_from_cli && prev.platform_path != fresh.platform_path,
+            ),
             ("host", prev.host != fresh.host),
             ("port", prev.port != fresh.port),
             (
