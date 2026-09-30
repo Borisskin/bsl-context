@@ -3,13 +3,23 @@
 //! Phase 0 (bootstrap) — HTTP-сервер с /health и заглушкой /mcp, без логики.
 //! Дальнейшие фазы добавляют hbk-парсер, индекс, MCP-tools.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing::{error, info};
 
 use bsl_context_server::sources::build_symbol_source;
 use bsl_context_server::{config, http, mcp_server, pid_lock};
+
+/// Транспорт MCP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Transport {
+    /// Сетевая служба: Streamable HTTP на host:port (поведение по умолчанию).
+    Http,
+    /// Обмен по стандартным потокам ввода-вывода: процесс запускает сам
+    /// MCP-клиент, вход и выход — кадры протокола, журнал идёт в поток ошибок.
+    Stdio,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -21,13 +31,28 @@ struct Cli {
     /// Путь к config.toml. Если не указан — используются дефолты.
     #[arg(short = 'c', long = "config", value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// Транспорт: http (по умолчанию) или stdio.
+    #[arg(long = "transport", value_enum, default_value_t = Transport::Http)]
+    transport: Transport,
+
+    /// Каталог установки 1С — переопределяет platform_path из config.toml.
+    /// Позволяет запустить stdio-режим без файла настройки.
+    #[arg(long = "platform-path", value_name = "PATH")]
+    platform_path: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let cfg = config::Config::load_or_default(cli.config.as_deref())?;
-    init_tracing(&cfg);
+    let mut cfg = config::Config::load_or_default(cli.config.as_deref())?;
+    // Опция командной строки приоритетнее файла: применяем до загрузки индекса и
+    // сборки сетевого узла, чтобы /health и журнал показывали действующее
+    // значение, а не файловое.
+    if let Some(platform_path) = cli.platform_path.clone() {
+        cfg.platform_path = Some(platform_path);
+    }
+    init_tracing(&cfg, cli.transport);
 
     let platform_path_display: String = cfg
         .platform_path
@@ -46,20 +71,29 @@ async fn main() -> anyhow::Result<()> {
     // Singleton-защита (см. ~/.claude/rules/service-build-checklist.md, пункт 7).
     // Берётся ДО загрузки индекса, чтобы второй экземпляр не тратил 5 секунд cold-start
     // и не конкурировал за RAM. Lock автоматически снимается через Drop при выходе.
-    let _pid_lock = match pid_lock::PidLock::acquire(&cfg.log_dir) {
-        Ok(lock) => lock,
-        Err(e) => {
-            error!(error = %e, "не удалось захватить PID-lock");
-            // stderr полезен, потому что супервизор фиксирует stderr-вывод в stderr.log
-            eprintln!("ERROR: {e}");
-            return Err(e);
+    //
+    // Только для сетевого режима: у службы один bind и один общий холодный старт.
+    // В stdio процессов ровно столько, сколько сеансов у клиента, — файл-замок
+    // запретил бы второй сеанс, ничего не защищая.
+    let _pid_lock = if cli.transport == Transport::Http {
+        match pid_lock::PidLock::acquire(&cfg.log_dir) {
+            Ok(lock) => Some(lock),
+            Err(e) => {
+                error!(error = %e, "не удалось захватить PID-lock");
+                // stderr полезен, потому что супервизор фиксирует stderr-вывод в stderr.log
+                eprintln!("ERROR: {e}");
+                return Err(e);
+            }
         }
+    } else {
+        None
     };
 
     if cfg.platform_path.is_none() {
         tracing::warn!(
-            "platform_path не задан в конфиге. /health стартует, но MCP-инструменты \
-             будут отвечать 503: индекс не загружен. На многоплатформенных машинах \
+            "platform_path не задан в конфиге. Сервер стартует, но инструменты \
+             справки будут отвечать отказом (в сетевом режиме — 503, /health \
+             отвечает): индекс не загружен. На многоплатформенных машинах \
              укажите каталог нужной версии 1С явно — например \
              'C:\\Program Files\\1cv8\\8.3.27.1786'. Автодетектора нет специально."
         );
@@ -88,10 +122,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Загрузка индекса (Phase 4): если platform_path задан — eager build перед стартом
-    // HTTP. Сборка из hbk занимает секунды (замер на 8.3.27 после распараллеливания
+    // транспорта. Сборка из hbk занимает секунды (замер на 8.3.27 после распараллеливания
     // разбора — ~1,3 с), поэтому делаем её синхронно через spawn_blocking, чтобы не
     // блокировать tokio worker. Готовый индекс пишется в дисковый кэш (см.
     // `platform_cache_path`): повторный старт читает кэш вместо разбора (~0,09 с).
+    //
+    // Индекс не собрался из-за отсутствия пути или файла — это не повод не
+    // стартовать: в сетевом режиме отдаётся прежняя 503-заглушка, в stdio —
+    // сервер отвечает понятной причиной на вызовы справки (см. `unavailable`).
+    let mut unavailable_reason: Option<String> = None;
     let mcp = if let Some(platform_path) = cfg.platform_path.clone() {
         let hbk_candidates = [
             platform_path.join("shcntx_ru.hbk"),
@@ -126,41 +165,114 @@ async fn main() -> anyhow::Result<()> {
                 // Путь нужен инструменту reload_config: без него перечитывать
                 // config.toml нечего, и вызов честно отвечает отказом.
                 if let Some(path) = cli.config.clone() {
-                    server = server.with_config_path(path);
+                    server = server
+                        .with_config_path(path)
+                        .with_effective_config(cfg.clone());
                 }
                 Some(server)
             }
             None => {
+                unavailable_reason = Some(format!(
+                    "в каталоге '{platform_path_display}' и его подкаталоге bin/ не найден \
+                     shcntx_ru.hbk — проверьте platform_path"
+                ));
                 tracing::warn!(
                     %platform_path_display,
-                    "не найден shcntx_ru.hbk в platform_path и его подкаталоге bin/. MCP-инструменты будут отдавать 503."
+                    "не найден shcntx_ru.hbk в platform_path и его подкаталоге bin/. \
+                     Инструменты справки будут отвечать отказом (в сетевом режиме — 503)."
                 );
                 None
             }
         }
     } else {
+        unavailable_reason = Some(
+            "platform_path не задан в config.toml (и не передан --platform-path): \
+             укажите каталог установки 1С нужной версии, например \
+             'C:\\Program Files\\1cv8\\8.3.27.2342'"
+                .to_string(),
+        );
         None
     };
 
-    let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
-    let app = http::router(cfg.clone(), mcp);
+    match cli.transport {
+        Transport::Http => {
+            let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port).parse()?;
+            let app = http::router(cfg.clone(), mcp);
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(%addr, "listening");
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!(%addr, "listening");
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
-        error!(error = %e, "server stopped with error");
-        return Err(e.into());
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal())
+                .await
+            {
+                error!(error = %e, "server stopped with error");
+                return Err(e.into());
+            }
+            info!("graceful shutdown complete");
+        }
+        Transport::Stdio => {
+            let server = match mcp {
+                Some(server) => server,
+                None => {
+                    let reason = unavailable_reason
+                        .unwrap_or_else(|| "платформенный индекс не загружен".to_string());
+                    tracing::warn!(%reason, "stdio: справка платформы недоступна");
+                    let mut server = mcp_server::BslContextServer::unavailable(reason);
+                    // Путь к config.toml нужен и в этом режиме: reload_config —
+                    // один из инструментов, работающих без индекса.
+                    if let Some(path) = cli.config.clone() {
+                        server = server
+                            .with_config_path(path)
+                            .with_effective_config(cfg.clone());
+                    }
+                    server
+                }
+            };
+            serve_stdio(server).await?;
+        }
     }
-    info!("graceful shutdown complete");
     Ok(())
 }
 
-/// Инициализация tracing: stdout + ежедневная ротация в log_dir.
-fn init_tracing(cfg: &config::Config) {
+/// Потоковый режим: кадры MCP через стандартные ввод и вывод.
+///
+/// Завершение штатное по EOF стандартного ввода (клиент закрыл процесс).
+/// Закрытие ввода ещё до рукопожатия — тоже штатный случай: клиент передумал.
+async fn serve_stdio(server: mcp_server::BslContextServer) -> anyhow::Result<()> {
+    use rmcp::service::{QuitReason, ServerInitializeError};
+    use rmcp::ServiceExt;
+
+    let service = match server.serve(rmcp::transport::io::stdio()).await {
+        Ok(service) => service,
+        Err(ServerInitializeError::ConnectionClosed(_)) => {
+            info!("stdio: входной поток закрыт до рукопожатия — завершение");
+            return Ok(());
+        }
+        Err(e) => return Err(anyhow::anyhow!("stdio: рукопожатие не состоялось: {e}")),
+    };
+
+    match service.waiting().await {
+        Ok(QuitReason::Closed | QuitReason::Cancelled) => {
+            info!("stdio: входной поток закрыт — завершение");
+            Ok(())
+        }
+        Ok(QuitReason::JoinError(e)) => Err(anyhow::anyhow!("stdio: служба упала: {e}")),
+        // QuitReason помечен non_exhaustive: любое другое нормальное
+        // завершение тоже успех.
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("stdio: служба упала: {e}")),
+    }
+}
+
+/// Инициализация tracing: консоль + ежедневная ротация в log_dir.
+///
+/// В сетевом режиме консоль идёт в stdout (как было), в потоковом — в stderr:
+/// stdout занят кадрами протокола, и одна строка журнала сломала бы сеанс.
+/// Файловый слой — best-effort: недоступный каталог журналов (частый случай у
+/// процесса, запущенного клиентом без прав на `C:\bsl-context-rs\logs`) не
+/// должен ронять сервер до рукопожатия.
+fn init_tracing(cfg: &config::Config, transport: Transport) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     // Каталог логов гарантированно существует — run.bat создаёт его до запуска
@@ -173,21 +285,49 @@ fn init_tracing(cfg: &config::Config) {
         );
     }
 
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
+
+    // Цвета — только для сетевого режима: поток ошибок принимает пайп клиента,
+    // а не терминал.
+    let console = fmt::layer()
+        .with_ansi(transport == Transport::Http)
+        .with_writer(move || -> Box<dyn std::io::Write + Send> {
+            match transport {
+                Transport::Http => Box::new(std::io::stdout()),
+                Transport::Stdio => Box::new(std::io::stderr()),
+            }
+        });
+
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
         .filename_prefix("service")
         .filename_suffix("log")
-        .build(&cfg.log_dir)
-        .expect("failed to initialize rolling file appender");
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.log_level));
+        .build(&cfg.log_dir);
 
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt::layer().with_writer(std::io::stdout))
-        .with(fmt::layer().with_writer(file_appender).with_ansi(false));
+    let init_result = match file_appender {
+        Ok(file_appender) => tracing_subscriber::registry()
+            .with(env_filter)
+            .with(console)
+            .with(fmt::layer().with_writer(file_appender).with_ansi(false))
+            .try_init(),
+        Err(e) => {
+            eprintln!(
+                "warning: файловый журнал в {} недоступен ({e}) — вывод только в {}",
+                cfg.log_dir.display(),
+                match transport {
+                    Transport::Http => "stdout",
+                    Transport::Stdio => "stderr",
+                }
+            );
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(console)
+                .try_init()
+        }
+    };
 
-    if subscriber.try_init().is_err() {
+    if init_result.is_err() {
         eprintln!("warning: tracing already initialized");
     }
 }

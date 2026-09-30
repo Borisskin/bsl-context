@@ -133,8 +133,32 @@ pub struct BslContextServer {
     /// Белый список инструментов из `[tools].enabled`. `None` — фильтр выключен.
     /// `Arc`, потому что сервер клонируется на каждый запрос.
     allowed_tools: Option<Arc<BTreeSet<String>>>,
+    /// Причина, по которой платформенный индекс не загружен. `None` — индекс
+    /// есть. Заполнена только у сервера из [`BslContextServer::unavailable`]:
+    /// индекс-зависимые инструменты отвечают отказом с этой причиной, а
+    /// инструменты обслуживания (перечитка конфига, источники имён) работают.
+    unavailable_reason: Option<Arc<str>>,
     tool_router: ToolRouter<Self>,
 }
+
+/// Инструменты, которым для ответа нужен платформенный индекс. Остальные
+/// (`reload_config`, `symbol_sources_status`, `reconnect_symbol_source`,
+/// `rebuild_symbol_index`) обязаны работать и без него: оператор, запустивший
+/// сервер без платформы, должен иметь возможность посмотреть состояние
+/// источников и перечитать настройку. Полнота разбиения закреплена тестом
+/// `tool_partition_matches_router`.
+const PLATFORM_INDEX_TOOLS: [&str; 10] = [
+    "search",
+    "info",
+    "get_member",
+    "get_members",
+    "get_constructors",
+    "get_enum_values",
+    "validate_enum",
+    "validate_method_call",
+    "validate_module",
+    "reserved_names",
+];
 
 impl BslContextServer {
     pub fn new(index: PlatformIndex) -> Self {
@@ -161,8 +185,19 @@ impl BslContextServer {
             config_path: None,
             cold_baseline: Arc::new(std::sync::Mutex::new(None)),
             allowed_tools: None,
+            unavailable_reason: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Сервер без платформенного индекса: `platform_path` не задан или hbk не
+    /// найден. Рукопожатие и `tools/list` работают — клиент видит инструменты
+    /// и причину в `instructions`, — а вызов справочного инструмента получает
+    /// понятный отказ вместо ложного «ничего не найдено» на пустом индексе.
+    pub fn unavailable(reason: String) -> Self {
+        let mut server = Self::with_defaults(PlatformIndex::new(), 1, Profile::Full);
+        server.unavailable_reason = Some(Arc::from(reason));
+        server
     }
 
     /// Подключить именованные источники имён (по одному на конфигурацию). Вызывается
@@ -217,6 +252,16 @@ impl BslContextServer {
             }
         }
         self.config_path = Some(Arc::new(path));
+        self
+    }
+
+    /// Заменить снимок «холодных» полей действующей конфигурацией — после
+    /// наложения опций командной строки (`--platform-path`). Без этого
+    /// `reload_config` сравнивал бы файл с файлом: предупреждение «применится
+    /// после перезапуска» называло бы источником значение из файла, которое
+    /// при активной опции не применяется.
+    pub fn with_effective_config(self, effective: crate::config::Config) -> Self {
+        *self.cold_baseline.lock().unwrap() = Some(effective);
         self
     }
 
@@ -1315,9 +1360,18 @@ impl BslContextServer {
 impl ServerHandler for BslContextServer {
     fn get_info(&self) -> rmcp::model::ServerInfo {
         let mut info = rmcp::model::ServerInfo::default();
-        info.instructions = Some(
-            "MCP-сервер контекста платформы 1С: типы, методы, свойства, конструкторы, значения системных перечислений.".into(),
-        );
+        info.instructions = Some(match &self.unavailable_reason {
+            None => "MCP-сервер контекста платформы 1С: типы, методы, свойства, \
+                 конструкторы, значения системных перечислений."
+                .to_string(),
+            // Причину видно клиенту в описании сервера, не дожидаясь отказа
+            // первого вызова инструмента.
+            Some(reason) => format!(
+                "MCP-сервер контекста платформы 1С: платформенный контекст НЕ загружен — \
+                 {reason}. Справочные инструменты отвечают отказом; доступны reload_config, \
+                 symbol_sources_status, reconnect_symbol_source и rebuild_symbol_index."
+            ),
+        });
         info.capabilities = rmcp::model::ServerCapabilities::builder()
             .enable_tools()
             .build();
@@ -1358,7 +1412,63 @@ impl ServerHandler for BslContextServer {
                 None,
             ));
         }
+        // Недоступный индекс — состояние сервера, а не ошибка аргументов:
+        // отдаём результат с `is_error`, чтобы модель увидела причину. Инструменты
+        // обслуживания (перечитка конфига, источники имён) не трогают индекс и
+        // обязаны работать — их в этом списке нет.
+        if let Some(reason) = &self.unavailable_reason {
+            if PLATFORM_INDEX_TOOLS.contains(&request.name.as_ref()) {
+                return Ok(rmcp::model::CallToolResult::error(vec![
+                    rmcp::model::Content::text(format!(
+                        "Платформенный контекст не загружен: {reason}"
+                    )),
+                ]));
+            }
+        }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         self.tool_router.call(tcc).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Инструменты, не зависящие от платформенного индекса: обязаны работать,
+    /// когда справка не загружена (иначе сервер без `platform_path` нельзя
+    /// починить, не перезапустив процесс).
+    const TOOLS_WITHOUT_INDEX: [&str; 4] = [
+        "reload_config",
+        "symbol_sources_status",
+        "reconnect_symbol_source",
+        "rebuild_symbol_index",
+    ];
+
+    /// Разбиение «нужен индекс / не нужен» обязано совпадать с фактическим
+    /// набором инструментов: забытый в `PLATFORM_INDEX_TOOLS` инструмент молча
+    /// ушёл бы работать с пустой справкой, а лишний — сломал бы инструмент
+    /// обслуживания.
+    #[test]
+    fn tool_partition_matches_router() {
+        let server = BslContextServer::new(PlatformIndex::new());
+        let mut actual: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        actual.sort();
+
+        let mut expected: Vec<String> = PLATFORM_INDEX_TOOLS
+            .iter()
+            .chain(TOOLS_WITHOUT_INDEX.iter())
+            .map(|name| name.to_string())
+            .collect();
+        expected.sort();
+
+        assert_eq!(
+            actual, expected,
+            "набор инструментов разошёлся с разбиением PLATFORM_INDEX_TOOLS/TOOLS_WITHOUT_INDEX"
+        );
     }
 }

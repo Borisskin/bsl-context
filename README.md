@@ -384,15 +384,35 @@ tool simply never appears.
 
 ## Running
 
+Network mode (default) — a Streamable HTTP service:
+
 ```bash
 bsl-context-rs --config /path/to/config.toml
 ```
 
 Healthcheck — `GET http://127.0.0.1:8007/health` (no MCP handshake required).
 
+Stream mode — the MCP client spawns the process itself, frames travel over standard
+input/output, and the log goes to standard error:
+
+```bash
+bsl-context-rs --transport stdio --config /path/to/config.toml
+bsl-context-rs --transport stdio --platform-path 'C:\Program Files\1cv8\8.3.27.1786'
+```
+
+`--platform-path` overrides `platform_path` from config.toml and allows starting
+without a config file. If the platform is not set or the `hbk` is missing, the server
+still starts: help tools answer with a clear refusal, while `reload_config`,
+`symbol_sources_status`, `reconnect_symbol_source` and `rebuild_symbol_index` keep
+working. Prefer absolute paths in config.toml: the client, not the server, sets the
+working directory.
+
 ## MCP tools
 
-Transport — Streamable HTTP at `http://127.0.0.1:8007/mcp` (stateless).
+Transport — Streamable HTTP at `http://127.0.0.1:8007/mcp` (stateless) or stdio
+(`--transport stdio`). In stream mode protocol frames travel over standard
+input/output and the log goes to standard error; tools and their behaviour are the
+same.
 
 | Tool | Purpose |
 |------|---------|
@@ -413,6 +433,8 @@ Transport — Streamable HTTP at `http://127.0.0.1:8007/mcp` (stateless).
 
 ## Connecting an MCP client
 
+Network mode:
+
 ```json
 {
   "mcpServers": {
@@ -423,6 +445,23 @@ Transport — Streamable HTTP at `http://127.0.0.1:8007/mcp` (stateless).
   }
 }
 ```
+
+Stream mode — the client spawns the process:
+
+```json
+{
+  "mcpServers": {
+    "bsl-context": {
+      "command": "C:\\tools\\bsl-context-rs\\bin\\bsl-context-rs.exe",
+      "args": ["--transport", "stdio", "--config", "C:\\tools\\bsl-context-rs\\configs\\config.toml"]
+    }
+  }
+}
+```
+
+Two notes for stream mode: the `Host` header filter (`allowed_hosts`) does not apply —
+there is no network listener; several client sessions are several processes, so their
+records in the shared log file may interleave.
 
 ## Changelog
 
