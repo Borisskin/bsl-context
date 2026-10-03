@@ -14,6 +14,7 @@ pub mod expression;
 pub mod homoglyphs;
 pub(crate) mod locals;
 pub mod module;
+pub mod module_context;
 pub mod query_rules;
 pub mod scope;
 pub mod symbols;

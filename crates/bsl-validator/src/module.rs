@@ -167,6 +167,13 @@ fn validate_module_at_level_inner(
         &mut errors,
     );
     check_new_expressions(index, source, &facts.news, &mut errors);
+    // Контекст модуля (issue #19): в модуле менеджера, объекта, набора записей и
+    // обычной формы неквалифицированный вызов разрешается методом самого объекта,
+    // а не глобальной функцией. Тип выводится из пути выгрузки; для формы ещё и
+    // по признаку «есть директивы компиляции» (управляемая форма объектных методов
+    // не видит). Не опознали — `None`, и проверка молчит, как и раньше.
+    let module_context = module_path
+        .and_then(|path| crate::module_context::context_type(index, path, facts.has_directives));
     check_global_calls(
         index,
         source,
@@ -176,6 +183,7 @@ fn validate_module_at_level_inner(
         symbols,
         owner_exports,
         symbols_degraded,
+        module_context,
         &mut errors,
     );
     check_shadowed_context_names(

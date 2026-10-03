@@ -62,6 +62,80 @@ pub struct MethodCallValidation {
     pub message: String,
 }
 
+/// Проверить вызов МЕТОДА ТИПА (не глобального) — по описанию типа из справки.
+///
+/// Нужно для методов контекста модуля (issue #19): неквалифицированный вызов в
+/// модуле менеджера, объекта или обычной формы разрешается методом самого объекта
+/// модуля, а не глобальной функцией. `None` — у типа такого метода нет (тогда
+/// вызывающий код решает сам, обычно сверяясь с глобальной сигнатурой).
+pub fn validate_type_method_call(
+    ty: &platform_index::Type,
+    method_name: &str,
+    arg_count: usize,
+) -> Option<MethodCallValidation> {
+    let method = ty.methods.iter().find(|m| {
+        m.name_ru.to_lowercase() == method_name.to_lowercase()
+            || m.name_en.to_lowercase() == method_name.to_lowercase()
+    })?;
+    let signatures: Vec<SignatureBrief> = method
+        .signatures
+        .iter()
+        .map(|s| brief_signature(&method.name_ru, s))
+        .collect();
+    if signatures.is_empty() {
+        // Сигнатура в справке не описана — число аргументов не проверяем.
+        return Some(MethodCallValidation {
+            valid: true,
+            method_name: method.name_ru.clone(),
+            arg_count,
+            signatures,
+            message: format!(
+                "⚠️ У метода '{}' нет описанных сигнатур — число аргументов не проверено.",
+                method.name_ru
+            ),
+        });
+    }
+    let any_match = signatures
+        .iter()
+        .any(|s| arg_count >= s.min_args && (s.variadic || arg_count <= s.max_args));
+    let allowed_ranges = signatures
+        .iter()
+        .map(|s| {
+            if s.variadic {
+                format!("{}+", s.min_args)
+            } else if s.min_args == s.max_args {
+                format!("{}", s.min_args)
+            } else {
+                format!("{}..{}", s.min_args, s.max_args)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" / ");
+    Some(if any_match {
+        MethodCallValidation {
+            valid: true,
+            method_name: method.name_ru.clone(),
+            arg_count,
+            signatures,
+            message: format!(
+                "✅ Вызов '{}' с {} аргументами допустим.",
+                method.name_ru, arg_count
+            ),
+        }
+    } else {
+        MethodCallValidation {
+            valid: false,
+            method_name: method.name_ru.clone(),
+            arg_count,
+            signatures,
+            message: format!(
+                "❌ Метод '{}.{}' не принимает {} аргументов. Допустимо: {}.",
+                ty.name_ru, method.name_ru, arg_count, allowed_ranges
+            ),
+        }
+    })
+}
+
 /// Проверить значение системного перечисления.
 pub fn validate_enum(index: &PlatformIndex, type_name: &str, value_name: &str) -> EnumValidation {
     let Some(ty) = index.find_type(type_name) else {
