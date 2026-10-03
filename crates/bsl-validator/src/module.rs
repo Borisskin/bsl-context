@@ -47,6 +47,7 @@ use crate::expression::{
     mask_strings_and_comments, strip_extension_directives, Confidence, ExprError, ExprErrorKind,
     ExpressionValidation, Profile,
 };
+use crate::locals::LocalNames;
 use crate::scope::{extract_scope_map, extract_type_annotations};
 use crate::symbols::SymbolSource;
 
@@ -141,7 +142,19 @@ fn validate_module_at_level_inner(
     // описка» здесь неправомерен: строгий режим выключаем, whitelist остаётся.
     let strict_unknown = !is_extension_module(&cleaned);
 
-    check_type_dot_members(index, source, &facts.dots, scope_map.as_ref(), &mut errors);
+    let form_module = module_path
+        .map(crate::context_names::is_form_module)
+        .unwrap_or(false);
+    let locals = LocalNames::new(&facts);
+    check_type_dot_members(
+        index,
+        source,
+        &facts.dots,
+        scope_map.as_ref(),
+        Some(&locals),
+        form_module,
+        &mut errors,
+    );
     check_new_expressions(index, source, &facts.news, &mut errors);
     check_global_calls(
         index,
@@ -154,9 +167,6 @@ fn validate_module_at_level_inner(
         symbols_degraded,
         &mut errors,
     );
-    let form_module = module_path
-        .map(crate::context_names::is_form_module)
-        .unwrap_or(false);
     check_shadowed_context_names(
         index,
         source,
