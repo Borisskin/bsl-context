@@ -566,7 +566,9 @@ pub(crate) fn check_type_dot_members(
 /// Имена членов типа — для подсказки «возможно, вы имели в виду».
 fn type_member_names(ty: &Type) -> Vec<String> {
     if ty.is_enum() {
-        return ty.enum_values.iter().map(|v| v.name_ru.clone()).collect();
+        // Диапазоны из справки показываем развёрнутыми: `A...Z` в подсказке
+        // бесполезен, нужны сами имена (issue #22).
+        return crate::enum_values::value_names(&ty.enum_values);
     }
     let mut names: Vec<String> = ty.methods.iter().map(|m| m.name_ru.clone()).collect();
     names.extend(ty.properties.iter().map(|p| p.name_ru.clone()));
@@ -580,14 +582,17 @@ fn type_member_names(ty: &Type) -> Vec<String> {
 /// `c`, а платформа принимает кириллическую. Без сведения корректный код получал
 /// `unknown_enum_value` с `confidence: high`, а подсказка предлагала имя, которое
 /// платформа отвергает.
+///
+/// Значения-диапазоны (`A...Z`, `F1...F12` у перечисления `Клавиша`)
+/// разворачиваются, а значения, которые платформа принимает ради совместимости,
+/// берутся из точечного словаря — иначе `Клавиша.A` и
+/// `ОтображениеОбычнойГруппы.Линия` дают ложную находку `high` (issue #22).
 fn type_has_member(ty: &Type, member: &str) -> bool {
-    let same = |name: &str| crate::homoglyphs::same_after_fold(name, member);
     if ty.is_enum() {
-        return ty
-            .enum_values
-            .iter()
-            .any(|v| same(&v.name_ru) || same(&v.name_en));
+        return crate::enum_values::has_value(&ty.enum_values, member)
+            || crate::enum_values::is_deprecated_value(&ty.name_ru, member);
     }
+    let same = |name: &str| crate::homoglyphs::same_after_fold(name, member);
     ty.methods
         .iter()
         .any(|m| same(&m.name_ru) || same(&m.name_en))

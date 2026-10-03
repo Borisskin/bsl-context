@@ -88,6 +88,14 @@ impl ProcScope {
     }
 }
 
+/// Имя и байтовое смещение места, где оно связано (например, заголовок цикла).
+#[derive(Debug, Clone)]
+pub struct NameSite {
+    /// Имя в нижнем регистре — сравнение в BSL регистронезависимо.
+    pub name: String,
+    pub byte: usize,
+}
+
 #[derive(Default)]
 pub struct AstFacts {
     /// Имена объявленных процедур/функций в нижнем регистре.
@@ -108,6 +116,12 @@ pub struct AstFacts {
     /// выглядит обращением к чужому объекту (замер на УТ: 39431 ложная находка
     /// именно на переменных циклов — `КлючЗначение`, `Элемент`, `СтрокаТЧ`).
     pub loop_vars: HashSet<String>,
+    /// Те же переменные циклов, но с местом связывания — там, где важна ОБЛАСТЬ
+    /// ВИДИМОСТИ: имя, связанное циклом в одной процедуре, не должно глушить
+    /// проверки в другой. На замере 14943 модулей модуль-широкое правило стоило
+    /// 2633 находок: модуль с `Для Каждого Поле Из СписокПолей Цикл` терял
+    /// проверку члена у ТИПА `Поле` во всех остальных процедурах.
+    pub loop_var_sites: Vec<NameSite>,
     /// Процедуры/функции модуля с их параметрами и признаком «без контекста».
     pub procs: Vec<ProcScope>,
     /// В модуле есть хотя бы одна директива компиляции (`&НаКлиенте`, `&НаСервере`, …).
@@ -148,6 +162,17 @@ pub struct AstFacts {
 ///    Минус в заголовке меняем на пробел (1 байт → 1 байт). Значения по умолчанию
 ///    в фактах не используются, поэтому смысл разбора не страдает.
 ///
+/// 7. **Кириллица вне русского алфавита.** Грамматика знает только `а-я` (как и
+///    `ё`, см. п.1), поэтому украинские, белорусские, казахские, сербские буквы
+///    (`і`, `ї`, `є`, `ґ`, `ў`, `қ`, `ң`, `ә`, `ө`, `ұ`, `ү`, `һ`, `ђ`, `ј`, `ѕ`,
+///    `ѣ`, `ѳ`, `ѵ`) рвут идентификатор на куски: `Прав(Закінчення, 1)` выглядит
+///    как три аргумента, и корректный код получает `wrong_argument_count` с
+///    `confidence: high` (issue #20: 1137 находок на шести конфигурациях, из них
+///    1090 — двуязычные ru/uk сообщения `НСтр`). Каждую такую букву меняем на
+///    русского двойника (2 байта → 2 байта), не-русские буквы вне таблицы — на
+///    `е`: для разбора важно лишь то, что буква законная, а имена мы читаем из
+///    ИСХОДНОГО текста, поэтому подмена на смысл не влияет.
+///
 /// Остаётся один дефект, который так обойти НЕЛЬЗЯ (длина изменится): обращение
 /// к результату тернарного оператора — `?(У, А, Б).Метод()`. Он даёт локальный
 /// `ERROR`, объявления и вызовы вокруг не теряются, а сам метод обезвреживается
@@ -169,21 +194,30 @@ pub fn normalize_for_parser(source: &str) -> std::borrow::Cow<'_, str> {
     let has_bare_raise = find_bare_raise(bytes, 0).is_some();
     let has_preproc_gap = find_preproc_gap(bytes, 0).is_some();
     let has_neg_default = !negative_defaults(bytes).is_empty();
+    let has_other_cyrillic = has_non_russian_cyrillic(bytes);
     if !has_yo
         && !has_nbsp
         && !has_ternary_gap
         && !has_bare_raise
         && !has_preproc_gap
         && !has_neg_default
+        && !has_other_cyrillic
     {
         return std::borrow::Cow::Borrowed(source);
     }
 
     let mut out = bytes.to_vec();
 
-    // ── 1. ё → е, Ё → Е;  4. неразрывный пробел → два обычных
+    // ── 1. ё → е, Ё → Е;  4. неразрывный пробел → два обычных;
+    //      7. кириллица вне русского алфавита → русский двойник
     let mut i = 0;
     while i + 1 < out.len() {
+        if let Some((b0, b1)) = fold_non_russian_cyrillic(out[i], out[i + 1]) {
+            out[i] = b0;
+            out[i + 1] = b1;
+            i += 2;
+            continue;
+        }
         match (out[i], out[i + 1]) {
             (0xD1, 0x91) => {
                 out[i] = 0xD0;
@@ -240,6 +274,103 @@ pub fn normalize_for_parser(source: &str) -> std::borrow::Cow<'_, str> {
     }
 
     std::borrow::Cow::Owned(String::from_utf8(out).expect("побайтные замены сохраняют UTF-8"))
+}
+
+/// Кодовая точка двухбайтной последовательности UTF-8 (0xD0..0xD3 — кириллица).
+fn cyrillic_code_point(b0: u8, b1: u8) -> Option<u32> {
+    if !(0xD0..=0xD3).contains(&b0) || !(0x80..=0xBF).contains(&b1) {
+        return None;
+    }
+    let cp = ((b0 as u32 & 0x1F) << 6) | (b1 as u32 & 0x3F);
+    (0x0400..=0x04FF).contains(&cp).then_some(cp)
+}
+
+/// Буква русского алфавита? `ё`/`Ё` считаются русскими: их обрабатывает
+/// отдельная ветка нормализации (п.1), и здесь они не трогаются.
+fn is_russian_cyrillic(cp: u32) -> bool {
+    (0x0410..=0x044F).contains(&cp) || cp == 0x0401 || cp == 0x0451
+}
+
+/// Привести код русской буквы к нижнему регистру (для таблицы двойников).
+fn lower_russian_cp(cp: u32) -> u32 {
+    match cp {
+        // А-Я → а-я
+        0x0410..=0x042F => cp + 0x20,
+        _ => cp,
+    }
+}
+
+/// Есть ли в тексте кириллица вне русского алфавита (issue #20).
+fn has_non_russian_cyrillic(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if let Some(cp) = cyrillic_code_point(bytes[i], bytes[i + 1]) {
+            if !is_russian_cyrillic(cp) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Заменить кириллическую букву вне русского алфавита русским двойником.
+///
+/// Возвращает новую пару байт (длина сохраняется: кириллица в UTF-8 всегда
+/// занимает два байта), либо `None`, если буква русская или это не кириллица.
+/// Регистр сохраняем: нормализованный текст остаётся визуально близким к
+/// исходному, что помогает при разборе ошибок.
+fn fold_non_russian_cyrillic(b0: u8, b1: u8) -> Option<(u8, u8)> {
+    let cp = cyrillic_code_point(b0, b1)?;
+    if is_russian_cyrillic(cp) {
+        return None;
+    }
+    // Верхний регистр: в основной кириллице (U+0400–U+045F) он на 0x50 ниже
+    // строчного, в расширенной (U+0460–U+04FF) — на единицу.
+    let (lower_cp, uppercase) = match cp {
+        0x0400..=0x040F => (cp + 0x50, true),
+        0x0460..=0x0481 | 0x048A..=0x04FF if cp % 2 == 0 => (cp + 1, true),
+        _ => (cp, false),
+    };
+    let russian = russian_lookalike(lower_cp);
+    let out_cp = if uppercase {
+        lower_russian_cp(russian as u32) - 0x20
+    } else {
+        russian as u32
+    };
+    Some((
+        0xC0 | ((out_cp >> 6) as u8 & 0x1F),
+        0x80 | (out_cp as u8 & 0x3F),
+    ))
+}
+
+/// Русский двойник для строчной кириллической буквы вне русского алфавита.
+///
+/// Таблица покрывает буквы, которые встречаются в реальных конфигурациях
+/// (украинские, белорусские, казахские, сербские, исторические русские).
+/// Незнакомая буква превращается в `е`: для разбора важно лишь то, что это
+/// законная буква, а имена читаются из ИСХОДНОГО текста.
+fn russian_lookalike(lower_cp: u32) -> char {
+    match lower_cp {
+        0x0450 | 0x0454 | 0x0463 => 'е', // ѐ є ѣ
+        0x0455 => 'з',                   // ѕ
+        0x0456 | 0x0475 => 'и',          // і ѵ
+        0x0457 | 0x0458 => 'й',          // ї ј
+        0x045B => 'ч',                   // ћ
+        0x045C => 'к',                   // ќ
+        0x045E => 'у',                   // ў
+        0x045F => 'ц',                   // џ
+        0x0473 => 'ф',                   // ѳ
+        0x0491 | 0x0493 => 'г',          // ґ ғ
+        0x049B => 'к',                   // қ
+        0x04A3 => 'н',                   // ң
+        0x04AF | 0x04B1 => 'у',          // ү ұ
+        0x04B3 => 'х',                   // ҳ
+        0x04BB => 'н',                   // һ
+        0x04D9 => 'а',                   // ә
+        0x04E9 => 'о',                   // ө
+        _ => 'е',
+    }
 }
 
 /// Позиции минусов в отрицательных значениях параметров по умолчанию.
@@ -676,7 +807,7 @@ pub fn collect_facts(source: &str) -> AstFacts {
                         if let Ok(name) = id_node.utf8_text(src) {
                             facts.calls.push(CallFact {
                                 name: name.to_string(),
-                                arg_count: count_arguments(node),
+                                arg_count: count_arguments(node, src),
                                 byte: id_node.start_byte(),
                             });
                         }
@@ -697,7 +828,12 @@ pub fn collect_facts(source: &str) -> AstFacts {
                     .find(|c| c.kind() == "identifier");
                 if let Some(ident) = ident {
                     if let Ok(name) = ident.utf8_text(src) {
-                        facts.loop_vars.insert(name.to_lowercase());
+                        let lower = name.to_lowercase();
+                        facts.loop_vars.insert(lower.clone());
+                        facts.loop_var_sites.push(NameSite {
+                            name: lower,
+                            byte: ident.start_byte(),
+                        });
                     }
                 }
             }
@@ -917,9 +1053,25 @@ fn is_no_context(directive: &str) -> bool {
     d.ends_with("безконтекста") || d.ends_with("nocontext")
 }
 
-/// Число аргументов голого вызова `Имя(...)`: именованные дети узла
-/// `arguments`, кроме комментариев. Узла `arguments` нет — аргументов 0.
-fn count_arguments(method_call: tree_sitter::Node) -> usize {
+/// Число аргументов голого вызова `Имя(...)`.
+///
+/// Считаем именованные дети узла `arguments`, кроме комментариев, но с одним
+/// правилом языка: **аргументы разделяются запятыми**. Если следующий ребёнок
+/// начинается сразу после предыдущего (между ними только пробелы и переводы
+/// строк), это ПРОДОЛЖЕНИЕ того же аргумента, а не новый. Так устроены соседние
+/// строковые литералы: платформа склеивает их через перевод строки
+/// (`СтрДлина("a" "b")` → 3, `Формат(Дата, "ДФ=" "дддд")` → «суббота»), а
+/// грамматика `tree-sitter-bsl` второй литерал отдаёт узлом `ERROR`, который
+/// раньше считался отдельным аргументом — и код получал ложный
+/// `wrong_argument_count` с `confidence: high` (issue #21). Тот же размен
+/// закрывает и `НСтр` из нескольких литералов.
+///
+/// Побочный эффект осознанный: если в вызове ПРОПУЩЕНА запятая между настоящими
+/// аргументами (`Метод(А Б)`), мы тоже сольём их в один и промолчим — на
+/// синтаксически неверном коде счёт аргументов не проверяем.
+///
+/// Узла `arguments` нет — аргументов 0.
+fn count_arguments(method_call: tree_sitter::Node, src: &[u8]) -> usize {
     let mut cursor = method_call.walk();
     let args = method_call
         .named_children(&mut cursor)
@@ -927,10 +1079,31 @@ fn count_arguments(method_call: tree_sitter::Node) -> usize {
     let Some(args) = args else {
         return 0;
     };
+    let mut count = 0usize;
+    let mut prev_end: Option<usize> = None;
+    let mut prev_kind = "";
     let mut cursor = args.walk();
-    args.named_children(&mut cursor)
-        .filter(|c| c.kind() != "line_comment")
-        .count()
+    for child in args.named_children(&mut cursor) {
+        if child.kind() == "line_comment" {
+            continue;
+        }
+        // `omitted_argument` — узел самого разделителя (`Ф(1, , 3)`): он считается
+        // аргументом, но сливать соседей через него нельзя.
+        let continues_previous = prev_kind != "omitted_argument"
+            && child.kind() != "omitted_argument"
+            && match prev_end {
+                Some(end) if end <= child.start_byte() => src[end..child.start_byte()]
+                    .iter()
+                    .all(|b| b.is_ascii_whitespace()),
+                _ => false,
+            };
+        if !continues_previous {
+            count += 1;
+        }
+        prev_end = Some(child.end_byte());
+        prev_kind = child.kind();
+    }
+    count
 }
 
 // ── Очистка строк и комментариев ──────────────────────────────────────────
@@ -1510,6 +1683,102 @@ mod tests {
         let facts = collect_facts("Ф(\"а,б\", 2);");
         assert_eq!(facts.calls.len(), 1);
         assert_eq!(facts.calls[0].arg_count, 2);
+    }
+
+    fn arg_count_of(src: &str, name: &str) -> usize {
+        collect_facts(src)
+            .calls
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("нет вызова {name} в {src:?}"))
+            .arg_count
+    }
+
+    /// Issue #20: кириллица вне русского алфавита не рвёт идентификатор.
+    ///
+    /// Грамматика знает только `а-я`, поэтому украинские, белорусские и казахские
+    /// буквы раньше делили имя на куски, и `Прав(Закінчення, 1)` выглядело как
+    /// вызов с тремя аргументами.
+    #[test]
+    fn non_russian_cyrillic_letters_keep_identifier_whole() {
+        for name in ["Закінчення", "Їжак", "Єнот", "Ґанок", "Қазақ", "ўсе", "ђак"]
+        {
+            let src = format!("Процедура Т()\n{name} = 1;\nР = Прав({name}, 1);\nД = СтрДлина({name});\nКонецПроцедуры\n");
+            let facts = collect_facts(&src);
+            let call = facts
+                .calls
+                .iter()
+                .find(|c| c.name == "Прав")
+                .unwrap_or_else(|| panic!("{name}: вызов Прав не найден"));
+            assert_eq!(
+                call.arg_count,
+                2,
+                "{name}: имя + 1 — два аргумента, а не три (факты: {:?})",
+                facts
+                    .calls
+                    .iter()
+                    .map(|c| (&c.name, c.arg_count))
+                    .collect::<Vec<_>>()
+            );
+            let single = facts
+                .calls
+                .iter()
+                .find(|c| c.name == "СтрДлина")
+                .unwrap_or_else(|| panic!("{name}: вызов СтрДлина не найден"));
+            assert_eq!(
+                single.arg_count,
+                1,
+                "{name}: у СтрДлина один аргумент (факты: {:?})",
+                facts
+                    .calls
+                    .iter()
+                    .map(|c| (&c.name, c.arg_count))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn non_russian_cyrillic_normalization_keeps_length() {
+        let src = "Закінчення = \"ок\";";
+        let normalized = normalize_for_parser(src);
+        assert_eq!(normalized.len(), src.len(), "длина обязана сохраняться");
+        assert_ne!(normalized.as_ref(), src, "буква должна быть заменена");
+        // Чисто русский текст не трогаем вовсе.
+        let pure = "Закинчення = \"ок\";";
+        assert!(matches!(
+            normalize_for_parser(pure),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Латинские имена тоже не трогаем.
+        let latin = "Check = \"ok\";";
+        assert!(matches!(
+            normalize_for_parser(latin),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    /// Issue #21: соседние строковые литералы — ОДИН аргумент.
+    ///
+    /// Платформа склеивает их через перевод строки (`СтрДлина("a" "b")` → 3,
+    /// `Формат(Дата, "ДФ=" "дддд")` → «суббота»), а грамматика второй литерал
+    /// отдаёт узлом `ERROR`. Пока он считался отдельным аргументом, корректный
+    /// код получал ложный `wrong_argument_count` с `confidence: high`.
+    #[test]
+    fn adjacent_string_literals_are_one_argument() {
+        assert_eq!(arg_count_of("СтрДлина(\"a\" \"b\");", "СтрДлина"), 1);
+        assert_eq!(arg_count_of("СтрДлина(\"a\"\n\"b\");", "СтрДлина"), 1);
+        assert_eq!(arg_count_of("Формат(Дата, \"ДФ=\" \"дддд\");", "Формат"), 2);
+        assert_eq!(
+            arg_count_of("НСтр(\"ru='x'\"\n\"';uk='y'\"\n\"'\");", "НСтр"),
+            1,
+            "многострочный НСтр из соседних литералов — один аргумент"
+        );
+        // Запятая по-прежнему разделяет аргументы.
+        assert_eq!(arg_count_of("СтрДлина(\"a\", \"b\");", "СтрДлина"), 2);
+        // Вложенные вызовы и пропущенный аргумент не затронуты.
+        assert_eq!(arg_count_of("Ф(Ф(1, 2), 3);", "Ф"), 2);
+        assert_eq!(arg_count_of("Ф(1, , 3);", "Ф"), 3);
     }
 
     #[test]

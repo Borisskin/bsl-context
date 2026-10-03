@@ -91,28 +91,27 @@ fn assign_re() -> &'static Regex {
         // Имя на левой стороне присваивания. Ловим "Идентификатор = ..." с возможным
         // префиксом из пробелов в начале строки. Lookbehind в regex crate нет,
         // поэтому используем (?m:^) и проверяем границы вручную.
-        Regex::new(
-            r"(?m:^)\s*(?P<lhs>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)\s*=\s*(?P<rhs>[^;\n]*)",
-        )
-        .unwrap()
+        //
+        // Класс буквы — `\p{L}`, а не `А-Яа-яЁё`: платформа принимает в именах
+        // ЛЮБЫЕ буквы Unicode, а диапазон русского алфавита рвал украинские и
+        // казахские имена на куски (issue #20: `Прав(Закінчення, 1)` выглядело
+        // как три аргумента).
+        Regex::new(r"(?m:^)\s*(?P<lhs>[\p{L}_][\p{L}\p{N}_]*)\s*=\s*(?P<rhs>[^;\n]*)").unwrap()
     })
 }
 
 fn new_rhs_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"(?i)^\s*(?:Новый|New)\s+(?P<ty>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)")
-            .unwrap()
+        Regex::new(r"(?i)^\s*(?:Новый|New)\s+(?P<ty>[\p{L}_][\p{L}\p{N}_]*)").unwrap()
     })
 }
 
 fn enum_rhs_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r"^\s*(?P<ty>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)\.(?P<member>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)\s*$",
-        )
-        .unwrap()
+        Regex::new(r"^\s*(?P<ty>[\p{L}_][\p{L}\p{N}_]*)\.(?P<member>[\p{L}_][\p{L}\p{N}_]*)\s*$")
+            .unwrap()
     })
 }
 
@@ -120,7 +119,7 @@ fn type_annot_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         // `// @type ТипX` или `// @type: ТипX`
-        Regex::new(r"//\s*@type:?\s+(?P<ty>[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё_0-9]*)").unwrap()
+        Regex::new(r"//\s*@type:?\s+(?P<ty>[\p{L}_][\p{L}\p{N}_]*)").unwrap()
     })
 }
 
