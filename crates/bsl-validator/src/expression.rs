@@ -24,7 +24,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use platform_index::PlatformIndex;
+use platform_index::{PlatformIndex, Type};
 
 use bsl_parse::{collect_facts, CallFact, DotFact, NewFact};
 
@@ -468,135 +468,178 @@ pub(crate) fn check_type_dot_members(
 
         // Уровень 1: head — это имя платформенного типа.
         // Уровень 2: head может быть локальной переменной с известным типом.
-        let resolved_type_name: Option<String> = if head_is_local {
+        // Тип бывает составным (несколько альтернатив): член проверяется по
+        // ОБЪЕДИНЕНИЮ, находка — только если его нет ни у одной альтернативы
+        // (issue #15, класс 4: `ПараметрыВыполненияКоманды.Источник` — форма ИЛИ
+        // окно, и проверка по одной из них давала ложную находку).
+        let candidates: Vec<String> = if head_is_local {
             locals
                 .and_then(|l| l.constructed_type(dot.head_byte, head))
-                .map(|t| t.to_string())
+                .map(|t| vec![t.to_string()])
                 .or_else(|| {
                     scope_map
                         .and_then(|sm| sm.type_of_var(dot.head_byte, head))
                         .cloned()
                 })
+                .unwrap_or_default()
+        } else if index.find_type(head).is_some() {
+            vec![head.to_string()]
         } else {
-            match index.find_type(head) {
-                Some(_) => Some(head.to_string()),
-                None => scope_map
-                    .and_then(|sm| sm.type_of_var(dot.head_byte, head))
-                    .cloned(),
-            }
+            scope_map
+                .and_then(|sm| sm.type_of_var(dot.head_byte, head))
+                .cloned()
+                .unwrap_or_default()
         };
-        let Some(type_name) = resolved_type_name else {
+        if candidates.is_empty() {
             continue; // head — обычная переменная без выведенного типа
-        };
-        let Some(ty) = index.find_type(&type_name) else {
+        }
+        let types: Vec<&Type> = candidates
+            .iter()
+            .filter_map(|name| index.find_type(name))
+            .collect();
+        if types.is_empty() {
             continue;
-        };
+        }
+        // Открытый состав членов — молчим целиком, если такая альтернатива есть
+        // хоть одна: значения открытого перечисления добавляет конфигурация
+        // (issue #2), а члены выборок/структур/COM-объектов задаются в рантайме
+        // (issue #15, класс 2).
+        if types
+            .iter()
+            .any(|ty| ty.is_open_enum() || is_dynamic_member_type(&ty.name_ru))
+        {
+            continue;
+        }
+        // Член есть хотя бы у одной альтернативы — находки нет. Имена сверяются
+        // со сведением латинско-кириллических двойников: в справке платформы
+        // встречаются неотличимые на экране опечатки (issue #18).
+        if types.iter().any(|ty| type_has_member(ty, member)) {
+            continue;
+        }
 
-        if ty.is_enum() {
-            if ty.is_open_enum() {
-                // Открытая коллекция (`ЦветаСтиля`, `БиблиотекаКартинок`):
-                // значения добавляет конфигурация, справка платформы их не
-                // знает. Проверка дала бы high-находку на каждый прикладной
-                // цвет или картинку (issue #2) — пропускаем.
-                continue;
-            }
-            // Проверяем что member — одно из enum_values (ru/en).
-            let m_lower = member.to_lowercase();
-            let exists = ty.enum_values.iter().any(|v| {
-                v.name_ru.to_lowercase() == m_lower || v.name_en.to_lowercase() == m_lower
-            });
-            if !exists {
-                let (line, col) = pos_at(src, dot.member_byte);
-                let allowed: Vec<String> =
-                    ty.enum_values.iter().map(|v| v.name_ru.clone()).collect();
-                let suggestion = closest_str(member, &allowed);
-                errors.push(ExprError::new(
-                    line,
-                    col,
-                    ExprErrorKind::UnknownEnumValue,
-                    format!(
-                        "Значение '{}' не существует у типа-перечисления '{}'.{}",
-                        member,
-                        ty.name_ru,
-                        suggestion
-                            .as_ref()
-                            .map(|s| format!(" Возможно, вы имели в виду '{s}'."))
-                            .unwrap_or_default()
-                    ),
-                    suggestion,
-                    Vec::new(),
-                ));
-            }
-        } else if is_dynamic_member_type(&ty.name_ru) {
-            // Типы с динамическими членами: поля задаются в runtime (колонки
-            // выборки запроса / таблицы значений / дерева, произвольные ключи
-            // структуры) и в hbk отсутствуют. Проверка членов для них даёт
-            // массовый false-positive (`Выборка.Регистратор`,
-            // `СтрокаТЗ.ОбъектОплаты`). Пропускаем целиком — размен: не ловим
-            // опечатку в статическом методе такого типа (`Выборка.Слндующий`),
-            // зато не плодим FP на полях. Выявлено регресс-прогоном level=3
-            // (карточка #1232 — урок про массовый FP).
-            continue;
+        let (line, col) = pos_at(src, dot.member_byte);
+        let allowed: Vec<String> = types.iter().flat_map(|ty| type_member_names(ty)).collect();
+        let suggestion = closest_str(member, &allowed);
+        let type_label = types
+            .iter()
+            .map(|ty| ty.name_ru.clone())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if types.iter().all(|ty| ty.is_enum()) {
+            errors.push(ExprError::new(
+                line,
+                col,
+                ExprErrorKind::UnknownEnumValue,
+                format!(
+                    "Значение '{}' не существует у типа-перечисления '{}'.{}",
+                    member,
+                    type_label,
+                    suggestion
+                        .as_ref()
+                        .map(|s| format!(" Возможно, вы имели в виду '{s}'."))
+                        .unwrap_or_default()
+                ),
+                suggestion,
+                Vec::new(),
+            ));
         } else {
-            let m_lower = member.to_lowercase();
-            let exists_method = ty.methods.iter().any(|m| {
-                m.name_ru.to_lowercase() == m_lower || m.name_en.to_lowercase() == m_lower
-            });
-            let exists_prop = ty.properties.iter().any(|p| {
-                p.name_ru.to_lowercase() == m_lower || p.name_en.to_lowercase() == m_lower
-            });
-            if !exists_method && !exists_prop {
-                let (line, col) = pos_at(src, dot.member_byte);
-                let mut allowed: Vec<String> =
-                    ty.methods.iter().map(|m| m.name_ru.clone()).collect();
-                allowed.extend(ty.properties.iter().map(|p| p.name_ru.clone()));
-                let suggestion = closest_str(member, &allowed);
-                errors.push(ExprError::new(
-                    line,
-                    col,
-                    ExprErrorKind::UnknownTypeMember,
-                    format!(
-                        "У типа '{}' нет члена '{}'.{}",
-                        ty.name_ru,
-                        member,
-                        suggestion
-                            .as_ref()
-                            .map(|s| format!(" Возможно: '{s}'."))
-                            .unwrap_or_default()
-                    ),
-                    suggestion,
-                    Vec::new(),
-                ));
-            }
+            errors.push(ExprError::new(
+                line,
+                col,
+                ExprErrorKind::UnknownTypeMember,
+                format!(
+                    "У типа '{}' нет члена '{}'.{}",
+                    type_label,
+                    member,
+                    suggestion
+                        .as_ref()
+                        .map(|s| format!(" Возможно: '{s}'."))
+                        .unwrap_or_default()
+                ),
+                suggestion,
+                Vec::new(),
+            ));
         }
     }
 }
 
-/// Типы платформы, члены которых задаются в runtime, а не описаны в hbk:
-/// колонки выборки запроса / таблицы значений / дерева значений, произвольные
-/// ключи структуры. Для них проверка `Объект.Член` бессмысленна (массовый FP:
-/// `Выборка.Регистратор`, `СтрокаТЗ.ОбъектОплаты`). На уровнях 1/2 такие типы
-/// как `head` почти не встречаются; проблема всплывает на level=3, где
-/// return-type tracking выводит их как тип переменной (`Выб = Рез.Выбрать()`).
+/// Имена членов типа — для подсказки «возможно, вы имели в виду».
+fn type_member_names(ty: &Type) -> Vec<String> {
+    if ty.is_enum() {
+        return ty.enum_values.iter().map(|v| v.name_ru.clone()).collect();
+    }
+    let mut names: Vec<String> = ty.methods.iter().map(|m| m.name_ru.clone()).collect();
+    names.extend(ty.properties.iter().map(|p| p.name_ru.clone()));
+    names
+}
+
+/// Есть ли у типа такой член: метод, свойство или значение перечисления.
+///
+/// Имена сверяются после сведения латинско-кириллических двойников (issue #18):
+/// в справке 8.3.17 значение записано как `БлокироватьВеcьИнтерфейс` с ЛАТИНСКОЙ
+/// `c`, а платформа принимает кириллическую. Без сведения корректный код получал
+/// `unknown_enum_value` с `confidence: high`, а подсказка предлагала имя, которое
+/// платформа отвергает.
+fn type_has_member(ty: &Type, member: &str) -> bool {
+    let same = |name: &str| crate::homoglyphs::same_after_fold(name, member);
+    if ty.is_enum() {
+        return ty
+            .enum_values
+            .iter()
+            .any(|v| same(&v.name_ru) || same(&v.name_en));
+    }
+    ty.methods
+        .iter()
+        .any(|m| same(&m.name_ru) || same(&m.name_en))
+        || ty
+            .properties
+            .iter()
+            .any(|p| same(&p.name_ru) || same(&p.name_en))
+}
+
+/// Типы с открытым (поздним) составом членов: колонки выборки запроса / таблицы
+/// значений / дерева значений, произвольные ключи структуры, реквизиты и элементы
+/// формы, свойства XDTO, COM-объект и внешний объект. Для них проверка
+/// `Объект.Член` бессмысленна: состав задаётся в рантайме и в `hbk` отсутствует
+/// (массовый FP: `Выборка.Регистратор`, `СтрокаТЗ.ОбъектОплаты`, `Подключение.Open`
+/// у COM-объекта). На уровнях 1/2 такие типы как `head` почти не встречаются;
+/// проблема всплывает на level=3, где return-type tracking выводит их как тип
+/// переменной (`Выб = Рез.Выбрать()`).
+///
+/// Написание — как в справке платформы; сравнение идёт со сведением
+/// латинско-кириллических двойников, поэтому регистр и алфавит отдельной буквы
+/// (`COMОбъект` — латиница плюс кириллица) значения не имеют.
+const DYNAMIC_MEMBER_TYPES: &[&str] = &[
+    // Колонки выборок и строк коллекций задаются текстом запроса / составом ТЗ.
+    "выборкаизрезультатазапроса",
+    "выборкаданных",
+    "строкатаблицызначений",
+    "строкадеревазначений",
+    // Произвольные ключи.
+    "структура",
+    "фиксированнаяструктура",
+    // Реквизиты и элементы конкретной формы — в метаданных формы, не в hbk.
+    "форма",
+    "управляемаяформа",
+    "элементыформы",
+    // Свойства XDTO задаются схемой/пакетом в runtime.
+    "объектxdto",
+    "значениеxdto",
+    // COM-объект и внешний объект: члены связываются поздно (issue #15, класс 2).
+    "comобъект",
+    "внешнийобъект",
+];
+
 fn is_dynamic_member_type(name_ru: &str) -> bool {
-    matches!(
-        name_ru.to_lowercase().as_str(),
-        // Колонки выборок и строк коллекций задаются текстом запроса / составом ТЗ.
-        "выборкаизрезультатазапроса"
-            | "выборкаданных"
-            | "строкатаблицызначений"
-            | "строкадеревазначений"
-            // Произвольные ключи.
-            | "структура"
-            | "фиксированнаяструктура"
-            // Реквизиты и элементы конкретной формы — в метаданных формы, не в hbk.
-            | "форма"
-            | "управляемаяформа"
-            | "элементыформы"
-            // Свойства XDTO задаются схемой/пакетом в runtime.
-            | "объектxdto"
-            | "значениеxdto"
-    )
+    // Сведение двойников — С ОБЕИХ СТОРОН. В списке есть имена с латиницей
+    // (`ОбъектXDTO`, `COMОбъект`), и приводить нужно и написание из справки, и
+    // элемент списка: иначе сравнение разъезжается. Этот регресс ловил корпусный
+    // замер — `ОбъектXDTO` перестал считаться динамическим типом и дал +177
+    // ложных находок на 3000 модулях, при том что модульные тесты молчали.
+    let folded = crate::homoglyphs::fold_lookalikes(&name_ru.to_lowercase());
+    DYNAMIC_MEMBER_TYPES
+        .iter()
+        .any(|entry| crate::homoglyphs::fold_lookalikes(entry) == folded)
 }
 
 pub(crate) fn check_new_expressions(
@@ -829,6 +872,10 @@ fn closest_str(target: &str, candidates: &[String]) -> Option<String> {
     let target_l = target.to_lowercase();
     candidates
         .iter()
+        // Имя из справки со смешанными алфавитами (`БлокироватьВеcьИнтерфейс`)
+        // в подсказку не отдаём: в коде его повторят дословно, а платформа такое
+        // имя отвергнет — подсказка сломала бы рабочий код (issue #18).
+        .filter(|c| !crate::homoglyphs::is_mixed_alphabet(c))
         .map(|c| (similarity(&target_l, &c.to_lowercase()), c.clone()))
         .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
         .filter(|(s, _)| *s > 0.5)
@@ -1242,5 +1289,30 @@ mod tests {
         );
         assert_eq!(result.errors[0].kind, ExprErrorKind::UnknownEnumValue);
         assert_eq!(result.errors[0].confidence, Confidence::High);
+    }
+
+    /// Issue #15, класс 2: члены `COMОбъект`/`ВнешнийОбъект` не проверяются.
+    /// Отдельно держим имена с латиницей в составе (`COMОбъект`, `ОбъектXDTO`):
+    /// список динамических типов сравнивается со сведением двойников С ОБЕИХ
+    /// сторон, и регресс на `ОбъектXDTO` уже проскакивал — его поймал корпусный
+    /// замер, а не модульные тесты.
+    #[test]
+    fn com_and_external_objects_are_dynamic_member_types() {
+        for name in [
+            "COMОбъект",
+            "ВнешнийОбъект",
+            "ОбъектXDTO",
+            "ЗначениеXDTO",
+            "ВыборкаИзРезультатаЗапроса",
+            "Структура",
+        ] {
+            assert!(
+                is_dynamic_member_type(name),
+                "{name} должен быть динамическим"
+            );
+        }
+        for name in ["Массив", "ТаблицаЗначений", "Строка"] {
+            assert!(!is_dynamic_member_type(name), "{name} — обычный тип");
+        }
     }
 }

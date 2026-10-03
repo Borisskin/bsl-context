@@ -32,14 +32,18 @@ use std::sync::OnceLock;
 
 use platform_index::PlatformIndex;
 
-/// Один scope — набор `имя_переменной_lower → ТипX` в пределах одной процедуры
+/// Один scope — набор `имя_переменной_lower → типы` в пределах одной процедуры
 /// (или модуля, если процедур нет).
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     /// Включающий байтовый диапазон `[start..end)`.
     pub byte_start: usize,
     pub byte_end: usize,
-    pub vars: HashMap<String, String>,
+    /// Альтернатив типа может быть несколько: тип свойства нередко составной
+    /// (`ПараметрыВыполненияКоманды.Источник` — `ФормаКлиентскогоПриложения` ИЛИ
+    /// `ОкноКлиентскогоПриложения`), и проверка члена обязана учесть все варианты,
+    /// а не первый (issue #15).
+    pub vars: HashMap<String, Vec<String>>,
 }
 
 impl Scope {
@@ -60,8 +64,11 @@ impl ScopeMap {
         self.scopes.iter().find(|s| s.contains(byte_idx))
     }
 
-    /// Получить тип переменной по имени, регистронезависимо.
-    pub fn type_of_var(&self, byte_idx: usize, var_name: &str) -> Option<&String> {
+    /// Типы переменной по имени на момент `byte_idx`, регистронезависимо.
+    ///
+    /// Возвращает альтернативы: у составного типа их несколько, и проверка члена
+    /// считает член найденным, если он есть хотя бы у одной.
+    pub fn type_of_var(&self, byte_idx: usize, var_name: &str) -> Option<&Vec<String>> {
         let scope = self.lookup(byte_idx)?;
         scope.vars.get(&var_name.to_lowercase())
     }
@@ -172,7 +179,7 @@ fn build_scope(
     annotations: &HashMap<usize, String>,
     level: u8,
 ) -> Scope {
-    let mut vars: HashMap<String, String> = HashMap::new();
+    let mut vars: HashMap<String, Vec<String>> = HashMap::new();
 
     // Абсолютные смещения ВСЕХ присваиваний тела: по ним видно, израсходована
     // ли аннотация. Без этого `// @type` цеплялась к каждому присваиванию в
@@ -199,7 +206,7 @@ fn build_scope(
         // случайная — набор находок менялся от запуска к запуску. Без проверки
         // «первое присваивание после аннотации» она цеплялась ко всем
         // последующим в окне и перебивала вывод по `Новый ТипX`.
-        let mut typ: Option<String> = annotations
+        let mut typ: Option<Vec<String>> = annotations
             .iter()
             .filter(|(&annot_end, _)| {
                 annot_end <= abs_start && abs_start.saturating_sub(annot_end) <= 200
@@ -210,14 +217,14 @@ fn build_scope(
                     .any(|&other| other >= annot_end && other < abs_start)
             })
             .max_by_key(|(&annot_end, _)| annot_end)
-            .map(|(_, annot_ty)| annot_ty.clone());
+            .map(|(_, annot_ty)| vec![annot_ty.clone()]);
 
         // 2. Если аннотации нет — пробуем извлечь из RHS.
         if typ.is_none() {
             if let Some(c) = new_rhs_re().captures(rhs) {
                 let ty = c.name("ty").unwrap().as_str();
                 if index.find_type(ty).is_some() {
-                    typ = Some(ty.to_string());
+                    typ = Some(vec![ty.to_string()]);
                 }
             }
         }
@@ -226,7 +233,7 @@ fn build_scope(
                 let ty = c.name("ty").unwrap().as_str();
                 if let Some(t) = index.find_type(ty) {
                     if t.is_enum() {
-                        typ = Some(ty.to_string());
+                        typ = Some(vec![ty.to_string()]);
                     }
                 }
             }
@@ -237,10 +244,11 @@ fn build_scope(
         // либо длиной >=2 звена (`obj.Метод()`), либо одиночный вызов
         // глобального метода (`ГлобальныйМетод()`). Опирается на vars,
         // уже собранные предыдущими присваиваниями (однопроходный порядок).
+        // Тип может выйти составным — храним все альтернативы (issue #15).
         if typ.is_none() && level >= 3 {
             if let Some(segs) = parse_chain(rhs) {
                 if segs.len() >= 2 || (segs.len() == 1 && segs[0].is_call) {
-                    typ = resolve_chain_type(index, &vars, &segs);
+                    typ = resolve_chain_types(index, &vars, &segs);
                 }
             }
         }
@@ -349,16 +357,21 @@ fn parse_chain(rhs: &str) -> Option<Vec<ChainSeg>> {
     }
 }
 
-/// Из (возможно составного) описания типа выбрать первый реально существующий
-/// в индексе компонент. В hbk возвращаемый тип нередко составной — например
-/// `Запрос.Выполнить()` даёт `"РезультатЗапроса, Неопределено"` — и каждый
-/// компонент может быть обёрнут в backtick'и (`to_markdown` сохраняет их из
-/// `<code>`-тегов hbk: `` `РезультатЗапроса`, `Неопределено` ``). Поэтому
-/// каждый компонент чистим от не-идентификаторных символов по краям (backtick,
-/// кавычки, пробелы). Берём первый известный тип, пропуская служебные
-/// `Неопределено`/`Произвольный`. `None` — если ни один компонент не является
-/// известным типом (резолв цепочки дальше не идёт, ошибка не порождается).
-pub(crate) fn primary_type(index: &PlatformIndex, raw: &str) -> Option<String> {
+/// Все известные типы из (возможно составного) описания типа, в порядке справки.
+///
+/// В hbk возвращаемый тип или тип свойства нередко составной — например
+/// `Запрос.Выполнить()` даёт `` `РезультатЗапроса`, `Неопределено` ``, а
+/// `ПараметрыВыполненияКоманды.Источник` — `` `ФормаКлиентскогоПриложения`,
+/// `ОкноКлиентскогоПриложения` ``. Каждый компонент может быть обёрнут в
+/// backtick'и (`to_markdown` сохраняет их из `<code>`-тегов hbk), поэтому края
+/// чистим от не-идентификаторных символов. Служебные `Неопределено` и
+/// `Произвольный` пропускаем, дубликаты схлопываем.
+///
+/// Возвращаем ВСЕ компоненты, а не первый: проверка члена обязана учесть каждую
+/// альтернативу (issue #15), иначе `Источник` проверялся бы по одному из двух
+/// типов и давал ложную находку.
+pub(crate) fn types_of(index: &PlatformIndex, raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     for part in raw.split([',', ';', '|']) {
         let p = part.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
         if p.is_empty()
@@ -367,55 +380,77 @@ pub(crate) fn primary_type(index: &PlatformIndex, raw: &str) -> Option<String> {
         {
             continue;
         }
-        if index.find_type(p).is_some() {
-            return Some(p.to_string());
+        if index.find_type(p).is_some() && !out.iter().any(|t| t.eq_ignore_ascii_case(p)) {
+            out.push(p.to_string());
         }
     }
-    None
+    out
 }
 
-/// Вычислить тип значения цепочки `head.member1(...).member2...`.
+/// Первый известный тип из описания (там, где альтернативы не нужны: например,
+/// тип свойства контекста в `context_names`).
+pub(crate) fn primary_type(index: &PlatformIndex, raw: &str) -> Option<String> {
+    types_of(index, raw).into_iter().next()
+}
+
+/// Вычислить типы значения цепочки `head.member1(...).member2...`.
 ///
 /// `head` резолвится: из `vars` (локальная переменная с выведенным типом),
 /// либо как вызов глобального метода (`ГлобальныйМетод()` → return_type),
 /// либо как голое имя платформенного типа. Дальше по каждому звену: метод →
-/// `return_type`, свойство → `type_name`. Любой неизвестный шаг (член не найден,
-/// тип пустой/«Произвольный») → `None` (тип не выводим, ошибку не порождаем).
-fn resolve_chain_type(
+/// `return_type`, свойство → `type_name`; если звено составное, продолжаем ВСЕ
+/// альтернативы (issue #15). Альтернатива, у которой члена нет, из результата
+/// выпадает; если выпали все — тип не выводим (`None`), и находок не будет.
+fn resolve_chain_types(
     index: &PlatformIndex,
-    vars: &HashMap<String, String>,
+    vars: &HashMap<String, Vec<String>>,
     segs: &[ChainSeg],
-) -> Option<String> {
+) -> Option<Vec<String>> {
     let head = &segs[0];
     let mut cur = if let Some(t) = vars.get(&head.name.to_lowercase()) {
         t.clone()
     } else if head.is_call {
         let m = index.find_global_method(&head.name)?;
-        primary_type(index, &m.return_type)?
+        types_of(index, &m.return_type)
     } else if index.find_type(&head.name).is_some() {
-        head.name.clone()
+        vec![head.name.clone()]
     } else {
         return None;
     };
+    if cur.is_empty() {
+        return None;
+    }
 
     for seg in &segs[1..] {
-        let ty = index.find_type(&cur)?;
-        let key = seg.name.to_lowercase();
-        let next = if let Some(m) = ty
-            .methods
-            .iter()
-            .find(|m| m.name_ru.to_lowercase() == key || m.name_en.to_lowercase() == key)
-        {
-            m.return_type.clone()
-        } else {
-            // член не найден — тип не выводим
-            ty.properties
-                .iter()
-                .find(|p| p.name_ru.to_lowercase() == key || p.name_en.to_lowercase() == key)?
-                .type_name
-                .clone()
-        };
-        cur = primary_type(index, &next)?;
+        let mut next: Vec<String> = Vec::new();
+        for type_name in &cur {
+            let Some(ty) = index.find_type(type_name) else {
+                continue;
+            };
+            let raw = if let Some(m) = ty.methods.iter().find(|m| {
+                crate::homoglyphs::same_after_fold(&m.name_ru, &seg.name)
+                    || crate::homoglyphs::same_after_fold(&m.name_en, &seg.name)
+            }) {
+                m.return_type.clone()
+            } else if let Some(p) = ty.properties.iter().find(|p| {
+                crate::homoglyphs::same_after_fold(&p.name_ru, &seg.name)
+                    || crate::homoglyphs::same_after_fold(&p.name_en, &seg.name)
+            }) {
+                p.type_name.clone()
+            } else {
+                // У этой альтернативы члена нет — ветка не продолжается.
+                continue;
+            };
+            for t in types_of(index, &raw) {
+                if !next.iter().any(|n| n.eq_ignore_ascii_case(&t)) {
+                    next.push(t);
+                }
+            }
+        }
+        if next.is_empty() {
+            return None;
+        }
+        cur = next;
     }
 
     Some(cur)
@@ -430,7 +465,7 @@ mod tests {
         let t = map
             .type_of_var(byte_idx, var)
             .unwrap_or_else(|| panic!("var '{var}' not found in scope"));
-        assert_eq!(t, expected_type);
+        assert_eq!(t, &vec![expected_type.to_string()]);
     }
 
     fn method(name: &str, return_type: &str) -> Method {
@@ -543,8 +578,8 @@ mod tests {
         let vars = HashMap::new();
         let segs = parse_chain("Запрос.Выполнить()").unwrap();
         assert_eq!(
-            resolve_chain_type(&idx, &vars, &segs),
-            Some("РезультатЗапроса".to_string())
+            resolve_chain_types(&idx, &vars, &segs),
+            Some(vec!["РезультатЗапроса".to_string()])
         );
     }
 
@@ -554,27 +589,59 @@ mod tests {
         let vars = HashMap::new();
         let segs = parse_chain("Запрос.Выполнить().Выбрать()").unwrap();
         assert_eq!(
-            resolve_chain_type(&idx, &vars, &segs),
-            Some("ВыборкаИзРезультатаЗапроса".to_string())
+            resolve_chain_types(&idx, &vars, &segs),
+            Some(vec!["ВыборкаИзРезультатаЗапроса".to_string()])
         );
     }
 
     #[test]
     fn resolve_chain_via_var_and_property() {
         let idx = mock_index();
-        let mut vars = HashMap::new();
-        vars.insert("рез".to_string(), "РезультатЗапроса".to_string());
+        let mut vars: HashMap<String, Vec<String>> = HashMap::new();
+        vars.insert("рез".to_string(), vec!["РезультатЗапроса".to_string()]);
         // голова — переменная с выведенным типом
         let segs = parse_chain("Рез.Выбрать()").unwrap();
         assert_eq!(
-            resolve_chain_type(&idx, &vars, &segs),
-            Some("ВыборкаИзРезультатаЗапроса".to_string())
+            resolve_chain_types(&idx, &vars, &segs),
+            Some(vec!["ВыборкаИзРезультатаЗапроса".to_string()])
         );
         // свойство → type_name
         let segs2 = parse_chain("Запрос.Текст").unwrap();
         assert_eq!(
-            resolve_chain_type(&idx, &vars, &segs2),
-            Some("Строка".to_string())
+            resolve_chain_types(&idx, &vars, &segs2),
+            Some(vec!["Строка".to_string()])
+        );
+    }
+
+    /// Issue #15, класс 4: составной тип свойства не схлопывается в одну
+    /// альтернативу — иначе `Источник` проверялся бы по одному из двух типов.
+    #[test]
+    fn composite_property_keeps_all_alternatives() {
+        let mut idx = mock_index();
+        idx.insert_type(ty(
+            "ФормаКлиентскогоПриложения",
+            vec![],
+            vec![property("ИмяФормы", "Строка")],
+        ));
+        idx.insert_type(ty("ОкноКлиентскогоПриложения", vec![], vec![]));
+        idx.insert_type(ty(
+            "ПараметрыВыполненияКоманды",
+            vec![],
+            vec![property(
+                "Источник",
+                "`ОкноКлиентскогоПриложения`, `ФормаКлиентскогоПриложения`",
+            )],
+        ));
+
+        let vars = HashMap::new();
+        let segs = parse_chain("ПараметрыВыполненияКоманды.Источник").unwrap();
+        assert_eq!(
+            resolve_chain_types(&idx, &vars, &segs),
+            Some(vec![
+                "ОкноКлиентскогоПриложения".to_string(),
+                "ФормаКлиентскогоПриложения".to_string()
+            ]),
+            "обе альтернативы обязаны дойти до проверки членов"
         );
     }
 
@@ -598,6 +665,11 @@ mod tests {
             primary_type(&idx, "`РезультатЗапроса`, `Неопределено`"),
             Some("РезультатЗапроса".to_string())
         );
+        // types_of отдаёт ВСЕ известные компоненты, а не первый
+        assert_eq!(
+            types_of(&idx, "`РезультатЗапроса`, `Неопределено`, `Строка`"),
+            vec!["РезультатЗапроса".to_string(), "Строка".to_string()]
+        );
     }
 
     #[test]
@@ -606,8 +678,8 @@ mod tests {
         let vars = HashMap::new();
         let segs = parse_chain("ПолучитьОбщийМакет()").unwrap();
         assert_eq!(
-            resolve_chain_type(&idx, &vars, &segs),
-            Some("ТабличныйДокумент".to_string())
+            resolve_chain_types(&idx, &vars, &segs),
+            Some(vec!["ТабличныйДокумент".to_string()])
         );
     }
 
@@ -616,7 +688,7 @@ mod tests {
         let idx = mock_index();
         let vars = HashMap::new();
         let segs = parse_chain("Запрос.НетТакогоМетода()").unwrap();
-        assert_eq!(resolve_chain_type(&idx, &vars, &segs), None);
+        assert_eq!(resolve_chain_types(&idx, &vars, &segs), None);
     }
 
     #[test]
