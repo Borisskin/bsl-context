@@ -118,7 +118,13 @@ fn validate_module_at_level_inner(
 
     let scope_map = if level >= 2 {
         let annotations = extract_type_annotations(source);
-        Some(extract_scope_map(index, &cleaned, &annotations, level))
+        Some(extract_scope_map(
+            index,
+            &cleaned,
+            &annotations,
+            level,
+            &facts.if_branches,
+        ))
     } else {
         None
     };
@@ -136,6 +142,11 @@ fn validate_module_at_level_inner(
     // `crate::declarations`).
     check_declarations(source, &cleaned, &mut errors);
     check_module_structure(source, &cleaned, &mut errors);
+
+    // Баланс блоков языка и обращение к члену у выражения (issue #17): дерево на
+    // таком коде восстанавливается и отдаёт `ERROR`, поэтому проверки текстовые.
+    crate::blocks::check_block_balance(source, &cleaned, &mut errors);
+    crate::blocks::check_member_access_on_expression(source, &cleaned, &mut errors);
 
     // Модуль расширения компилируется вместе с расширяемым и напрямую зовёт его
     // процедуры. Их текста у валидатора нет, поэтому вывод «вызов не объявлен —

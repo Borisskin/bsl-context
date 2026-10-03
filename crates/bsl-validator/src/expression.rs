@@ -229,6 +229,19 @@ pub enum ExprErrorKind {
     /// исходного текста модуля»), и весь код ниже теряется. Эмиттится только из
     /// `crate::declarations`.
     UnbalancedModuleBlock,
+    /// Блок языка не закрыт или закрыт не тем ключевым словом: `Попытка` без
+    /// `КонецПопытки`, `Если` без `КонецЕсли`, `Цикл` без `КонецЦикла`. Модуль не
+    /// компилируется («Ожидается КонецПопытки»), а дерево `tree-sitter-bsl` на
+    /// таком коде восстанавливается и отдаёт узлы `ERROR` — поэтому проверка
+    /// текстовая (`crate::blocks`). Эмиттится только из `validate_module`.
+    UnbalancedCodeBlock,
+    /// Обращение к члену у ВЫРАЖЕНИЯ: у результата конструктора
+    /// (`Новый Файл("x").Расширение`) или у группирующих скобок
+    /// (`(Новый Файл("x")).Размер()`). Платформа разрешает обращение к члену
+    /// только после ВЫЗОВА метода (`Запрос.Выполнить().Выбрать()`), остальное не
+    /// компилируется. Текстовая проверка `crate::blocks`, только из
+    /// `validate_module`.
+    MemberAccessOnExpression,
 }
 
 impl ExprErrorKind {
@@ -275,7 +288,12 @@ impl ExprErrorKind {
             // их блокировать, поэтому High и место в `strict`.
             | ExprErrorKind::ReservedProcedureName
             | ExprErrorKind::DuplicateDeclaration
-            | ExprErrorKind::UnbalancedModuleBlock => Confidence::High,
+            | ExprErrorKind::UnbalancedModuleBlock
+            // Находки `crate::blocks` (issue #17): баланс блоков языка и
+            // обращение к члену у выражения. Тоже не эвристика — платформа такой
+            // модуль не компилирует.
+            | ExprErrorKind::UnbalancedCodeBlock
+            | ExprErrorKind::MemberAccessOnExpression => Confidence::High,
             // Соединение с подзапросом иногда оправдано (маленький набор,
             // однократное вычисление) — оставляем на усмотрение читающего.
             ExprErrorKind::UnknownTypeMember
@@ -366,7 +384,13 @@ pub fn validate_expression_at_level(
     let facts = collect_facts(source);
     let scope_map = if level >= 2 {
         let annotations = extract_type_annotations(source);
-        Some(extract_scope_map(index, &cleaned, &annotations, level))
+        Some(extract_scope_map(
+            index,
+            &cleaned,
+            &annotations,
+            level,
+            &facts.if_branches,
+        ))
     } else {
         None
     };
@@ -473,21 +497,18 @@ pub(crate) fn check_type_dot_members(
         // (issue #15, класс 4: `ПараметрыВыполненияКоманды.Источник` — форма ИЛИ
         // окно, и проверка по одной из них давала ложную находку).
         let candidates: Vec<String> = if head_is_local {
+            // Тип из ближайшего конструктора выше точки, иначе — из вывода типов.
+            // Оба источника позиционны и учитывают ветви `Если/Иначе` (issue #15,
+            // класс 1).
             locals
                 .and_then(|l| l.constructed_type(dot.head_byte, head))
-                .map(|t| vec![t.to_string()])
-                .or_else(|| {
-                    scope_map
-                        .and_then(|sm| sm.type_of_var(dot.head_byte, head))
-                        .cloned()
-                })
+                .or_else(|| scope_map.and_then(|sm| sm.type_of_var(dot.head_byte, head)))
                 .unwrap_or_default()
         } else if index.find_type(head).is_some() {
             vec![head.to_string()]
         } else {
             scope_map
                 .and_then(|sm| sm.type_of_var(dot.head_byte, head))
-                .cloned()
                 .unwrap_or_default()
         };
         if candidates.is_empty() {

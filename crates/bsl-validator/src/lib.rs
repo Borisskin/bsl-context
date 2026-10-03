@@ -3,6 +3,7 @@
 //! Phase 5 — точечные проверки `validateEnum` и `validateMethodCall` без парсера.
 //! Phase 6 (отдельный модуль `expression`) — `validateExpression` через tree-sitter.
 
+pub mod blocks;
 pub mod check;
 pub mod config_objects;
 pub mod context_names;
