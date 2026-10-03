@@ -417,6 +417,7 @@ pub fn validate_expression_at_level(
         None,
         None,
         false,
+        None,
         &mut errors,
     );
     errors.sort_by_key(|e| (e.line, e.col));
@@ -733,6 +734,7 @@ pub(crate) fn check_global_calls(
     symbols: Option<&dyn SymbolSource>,
     owner_exports: Option<&HashSet<String>>,
     symbols_degraded: bool,
+    module_context: Option<&Type>,
     errors: &mut Vec<ExprError>,
 ) {
     // Методы собственного объекта/формы/менеджера зовутся из его модуля без
@@ -859,6 +861,33 @@ pub(crate) fn check_global_calls(
             }
             continue;
         };
+
+        // Неквалифицированный вызов в модуле менеджера, объекта или обычной формы
+        // разрешается методом КОНТЕКСТА модуля, а не глобальной функцией
+        // (issue #19): `ПолучитьФорму` в модуле обычной формы — это
+        // `ДокументОбъект.ПолучитьФорму(<Форма>, <Владелец>, <КлючУникальности>)`
+        // с тремя параметрами, а не глобальная функция с диапазоном 1..6,
+        // и `ПолучитьДанныеВыбора(Параметры)` в модуле менеджера — метод
+        // менеджера. Если метод у контекста есть, сверяемся с НИМ и на этом
+        // заканчиваем: глобальная сигнатура здесь не источник истины.
+        if let Some(context) = module_context {
+            if let Some(result) =
+                crate::check::validate_type_method_call(context, &call.name, call.arg_count)
+            {
+                if !result.valid {
+                    let (line, col) = pos_at(src, call.byte);
+                    errors.push(ExprError::new(
+                        line,
+                        col,
+                        ExprErrorKind::WrongArgumentCount,
+                        result.message,
+                        None,
+                        Vec::new(),
+                    ));
+                }
+                continue;
+            }
+        }
 
         let result = validate_method_call(index, &call.name, call.arg_count);
         if !result.valid {
