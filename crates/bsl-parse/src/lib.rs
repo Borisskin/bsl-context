@@ -96,6 +96,21 @@ pub struct NameSite {
     pub byte: usize,
 }
 
+/// Ветви одного условного оператора: диапазоны тел `Тогда`, `ИначеЕсли…`, `Иначе`.
+///
+/// Нужны выводу типов: если переменная получает РАЗНЫЕ типы в разных ветвях
+/// (`Если … Х = Новый Массив; Иначе Х = Новый Структура; КонецЕсли;`), то после
+/// `КонецЕсли` её тип — объединение альтернатив, а не тип последней ветки. Без
+/// этого имя получало тип одной ветки и давало ложную находку на члене другой
+/// (issue #15, класс 1).
+#[derive(Debug, Clone)]
+pub struct IfBranches {
+    /// Диапазон всего оператора `Если … КонецЕсли`.
+    pub span: (usize, usize),
+    /// Тела ветвей в порядке появления.
+    pub branches: Vec<(usize, usize)>,
+}
+
 #[derive(Default)]
 pub struct AstFacts {
     /// Имена объявленных процедур/функций в нижнем регистре.
@@ -122,6 +137,8 @@ pub struct AstFacts {
     /// 2633 находок: модуль с `Для Каждого Поле Из СписокПолей Цикл` терял
     /// проверку члена у ТИПА `Поле` во всех остальных процедурах.
     pub loop_var_sites: Vec<NameSite>,
+    /// Ветви условных операторов — для объединения типов после `КонецЕсли`.
+    pub if_branches: Vec<IfBranches>,
     /// Процедуры/функции модуля с их параметрами и признаком «без контекста».
     pub procs: Vec<ProcScope>,
     /// В модуле есть хотя бы одна директива компиляции (`&НаКлиенте`, `&НаСервере`, …).
@@ -812,6 +829,42 @@ pub fn collect_facts(source: &str) -> AstFacts {
                             });
                         }
                     }
+                }
+            }
+            "if_statement" => {
+                // Тела ветвей `Если`: тело `Тогда` — от конца ключевого слова до
+                // первой ветви-продолжения; `ИначеЕсли…`/`Иначе` — собственные
+                // узлы с готовыми диапазонами (проверено печатью дерева).
+                let mut then_start: Option<usize> = None;
+                let mut then_end: Option<usize> = None;
+                let mut branches: Vec<(usize, usize)> = Vec::new();
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    match child.kind() {
+                        "THEN_KEYWORD" => then_start = Some(child.end_byte()),
+                        "elseif_clause" | "else_clause" => {
+                            if then_start.is_some() && then_end.is_none() {
+                                then_end = Some(child.start_byte());
+                            }
+                            branches.push((child.start_byte(), child.end_byte()));
+                        }
+                        // Конец ветви `Тогда` — начало первой ветви-продолжения.
+                        "ENDIF_KEYWORD" if then_start.is_some() && then_end.is_none() => {
+                            then_end = Some(child.start_byte());
+                        }
+                        _ => {}
+                    }
+                }
+                if let (Some(start), Some(end)) = (then_start, then_end) {
+                    if start < end {
+                        branches.insert(0, (start, end));
+                    }
+                }
+                if branches.len() > 1 {
+                    facts.if_branches.push(IfBranches {
+                        span: (node.start_byte(), node.end_byte()),
+                        branches,
+                    });
                 }
             }
             "for_each_statement" | "for_statement" => {

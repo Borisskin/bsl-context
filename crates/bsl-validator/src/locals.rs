@@ -44,21 +44,63 @@ impl<'a> LocalNames<'a> {
     /// (`Запрос`, `Массив`, `Структура` — обычное дело в 1С): их члены проверяются
     /// по типу из конструктора, а не по совпадению имени с типом.
     ///
+    /// Берётся БЛИЖАЙШЕЕ присваивание ВЫШЕ точки, а не первое в процедуре
+    /// (issue #15, класс 1: после переприсваивания тип не менялся). Если ближайшее
+    /// присваивание — не конструктор, тип неизвестен (`None`), и решение принимает
+    /// вызывающий код. Если присваивание сделано внутри ветви условного оператора,
+    /// а спрашиваем мы после него, возвращаются типы ВСЕХ ветвей: переменная может
+    /// иметь любой из них. Если в соседней ветви присваивание без конструктора, тип
+    /// неизвестен — `None`, потому что молчание лучше ложной находки.
+    ///
     /// Учитывается только присваивание в ТОЙ ЖЕ процедуре (для кода вне процедур —
     /// на уровне модуля): переменные BSL локальны для процедуры, и тип из чужой
     /// процедуры к этой точке отношения не имеет.
-    pub(crate) fn constructed_type(&self, byte: usize, name: &str) -> Option<&str> {
+    pub(crate) fn constructed_type(&self, byte: usize, name: &str) -> Option<Vec<String>> {
         let name_lower = name.to_lowercase();
         let scope = self.facts.procs.iter().find(|p| p.contains(byte));
-        self.facts
+        let in_scope = |site: usize| match scope {
+            Some(s) => s.contains(site),
+            None => !self.facts.procs.iter().any(|p| p.contains(site)),
+        };
+        let nearest = self
+            .facts
             .assigns
             .iter()
-            .filter(|a| a.name.to_lowercase() == name_lower && a.new_type.is_some())
-            .find(|a| match scope {
-                Some(s) => s.contains(a.byte),
-                None => !self.facts.procs.iter().any(|p| p.contains(a.byte)),
+            .filter(|a| a.name.to_lowercase() == name_lower && a.byte <= byte && in_scope(a.byte))
+            .max_by_key(|a| a.byte)?;
+        let mut types: Vec<String> = vec![nearest.new_type.as_deref()?.to_string()];
+
+        // Ветви того же условного оператора, уже закрытого к этой точке.
+        let block = self
+            .facts
+            .if_branches
+            .iter()
+            .filter(|b| b.span.1 <= byte)
+            .filter(|b| {
+                b.branches
+                    .iter()
+                    .any(|(s, e)| *s <= nearest.byte && nearest.byte < *e)
             })
-            .and_then(|a| a.new_type.as_deref())
+            .min_by_key(|b| b.span.1.saturating_sub(b.span.0));
+        if let Some(block) = block {
+            for a in self.facts.assigns.iter().filter(|a| {
+                a.name.to_lowercase() == name_lower && a.byte <= byte && in_scope(a.byte)
+            }) {
+                if !block
+                    .branches
+                    .iter()
+                    .any(|(s, e)| *s <= a.byte && a.byte < *e)
+                {
+                    continue;
+                }
+                // В соседней ветви тип не из конструктора — не угадываем.
+                let t = a.new_type.as_deref()?;
+                if !types.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                    types.push(t.to_string());
+                }
+            }
+        }
+        Some(types)
     }
 
     /// Имя в этой точке — локальная переменная, а не имя типа?
@@ -205,7 +247,7 @@ mod tests {
         assert!(locals.is_local(byte, "Блокировка"));
         assert_eq!(
             locals.constructed_type(byte, "Блокировка"),
-            Some("БлокировкаДанных")
+            Some(vec!["БлокировкаДанных".to_string()])
         );
     }
 
@@ -240,7 +282,10 @@ mod tests {
         let locals = LocalNames::new(&facts);
         let byte = byte_of(src, "Запрос.Текст");
         assert!(locals.is_local(byte, "Запрос"));
-        assert_eq!(locals.constructed_type(byte, "Запрос"), Some("Запрос"));
+        assert_eq!(
+            locals.constructed_type(byte, "Запрос"),
+            Some(vec!["Запрос".to_string()])
+        );
     }
 
     #[test]

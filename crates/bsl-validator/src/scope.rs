@@ -32,23 +32,89 @@ use std::sync::OnceLock;
 
 use platform_index::PlatformIndex;
 
-/// Один scope — набор `имя_переменной_lower → типы` в пределах одной процедуры
-/// (или модуля, если процедур нет).
+use bsl_parse::IfBranches;
+
+/// Один scope — привязки имён в пределах одной процедуры (или модуля, если
+/// процедур нет).
 #[derive(Debug, Clone, Default)]
 pub struct Scope {
     /// Включающий байтовый диапазон `[start..end)`.
     pub byte_start: usize,
     pub byte_end: usize,
-    /// Альтернатив типа может быть несколько: тип свойства нередко составной
-    /// (`ПараметрыВыполненияКоманды.Источник` — `ФормаКлиентскогоПриложения` ИЛИ
-    /// `ОкноКлиентскогоПриложения`), и проверка члена обязана учесть все варианты,
-    /// а не первый (issue #15).
-    pub vars: HashMap<String, Vec<String>>,
+    /// Привязки имён в порядке появления в тексте. Именно ПОСЛЕДОВАТЕЛЬНОСТЬ, а не
+    /// карта «имя → тип»: тип переменной берётся из ближайшего присваивания ВЫШЕ
+    /// точки использования, а не из присваивания в другом месте процедуры
+    /// (issue #15, класс 1: имя получало тип из ветки или из строки ниже, к
+    /// которой в этой точке отношения нет).
+    pub bindings: Vec<VarBinding>,
+    /// Ветви условных операторов этого scope — для объединения типов после
+    /// `КонецЕсли` (issue #15, класс 1).
+    pub if_branches: Vec<IfBranches>,
+}
+
+/// Привязка имени к типу в конкретном месте текста.
+#[derive(Debug, Clone)]
+pub struct VarBinding {
+    /// Имя переменной в нижнем регистре (в BSL регистр не различается).
+    pub name: String,
+    /// Байт имени в левой части присваивания.
+    pub byte: usize,
+    /// Альтернативы типа: у составного типа их несколько (issue #15, класс 4).
+    pub types: Vec<String>,
 }
 
 impl Scope {
     pub fn contains(&self, byte_idx: usize) -> bool {
         byte_idx >= self.byte_start && byte_idx < self.byte_end
+    }
+
+    /// Типы переменной на момент `byte`: ближайшая привязка не позже этой точки.
+    ///
+    /// Если ближайшая привязка сделана ВНУТРИ ветви условного оператора, а
+    /// спрашиваем мы уже ПОСЛЕ него, тип мог прийти из любой ветви — возвращаем
+    /// объединение альтернатив (issue #15, класс 1). Внутри самой ветви объединения
+    /// нет: там действует только своя ветка.
+    pub fn type_of_var(&self, byte: usize, var_name: &str) -> Option<Vec<String>> {
+        let lower = var_name.to_lowercase();
+        let nearest = self
+            .bindings
+            .iter()
+            .rev()
+            .find(|b| b.name == lower && b.byte <= byte)?;
+        let mut types = nearest.types.clone();
+
+        // Самая вложенная ветвь, накрывающая привязку и уже закрытая к этой точке.
+        let block = self
+            .if_branches
+            .iter()
+            .filter(|b| b.span.1 <= byte)
+            .filter(|b| {
+                b.branches
+                    .iter()
+                    .any(|(s, e)| *s <= nearest.byte && nearest.byte < *e)
+            })
+            .min_by_key(|b| b.span.1.saturating_sub(b.span.0));
+        if let Some(block) = block {
+            for binding in self
+                .bindings
+                .iter()
+                .filter(|b| b.name == lower && b.byte <= byte)
+            {
+                let in_block = block
+                    .branches
+                    .iter()
+                    .any(|(s, e)| *s <= binding.byte && binding.byte < *e);
+                if !in_block {
+                    continue;
+                }
+                for t in &binding.types {
+                    if !types.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                        types.push(t.clone());
+                    }
+                }
+            }
+        }
+        Some(types)
     }
 }
 
@@ -68,9 +134,8 @@ impl ScopeMap {
     ///
     /// Возвращает альтернативы: у составного типа их несколько, и проверка члена
     /// считает член найденным, если он есть хотя бы у одной.
-    pub fn type_of_var(&self, byte_idx: usize, var_name: &str) -> Option<&Vec<String>> {
-        let scope = self.lookup(byte_idx)?;
-        scope.vars.get(&var_name.to_lowercase())
+    pub fn type_of_var(&self, byte_idx: usize, var_name: &str) -> Option<Vec<String>> {
+        self.lookup(byte_idx)?.type_of_var(byte_idx, var_name)
     }
 }
 
@@ -130,6 +195,7 @@ pub fn extract_scope_map(
     cleaned: &str,
     annotations: &HashMap<usize, String>,
     level: u8,
+    if_branches: &[IfBranches],
 ) -> ScopeMap {
     let mut scopes = Vec::new();
     let blocks: Vec<(usize, usize)> = proc_block_re()
@@ -139,12 +205,20 @@ pub fn extract_scope_map(
 
     if blocks.is_empty() {
         // Глобальный scope на весь файл.
-        let scope = build_scope(index, cleaned, 0, cleaned.len(), annotations, level);
+        let scope = build_scope(
+            index,
+            cleaned,
+            0,
+            cleaned.len(),
+            annotations,
+            level,
+            if_branches,
+        );
         scopes.push(scope);
     } else {
         for (start, end) in blocks {
             let body = &cleaned[start..end];
-            let scope = build_scope(index, body, start, end, annotations, level);
+            let scope = build_scope(index, body, start, end, annotations, level, if_branches);
             scopes.push(scope);
         }
     }
@@ -177,8 +251,16 @@ fn build_scope(
     byte_end: usize,
     annotations: &HashMap<usize, String>,
     level: u8,
+    if_branches: &[IfBranches],
 ) -> Scope {
-    let mut vars: HashMap<String, Vec<String>> = HashMap::new();
+    let mut bindings: Vec<VarBinding> = Vec::new();
+    // Ветви, целиком лежащие внутри этого scope: объединение типов после
+    // `КонецЕсли` считается только по своим ветвям (issue #15, класс 1).
+    let own_branches: Vec<IfBranches> = if_branches
+        .iter()
+        .filter(|b| byte_start <= b.span.0 && b.span.1 <= byte_end)
+        .cloned()
+        .collect();
 
     // Абсолютные смещения ВСЕХ присваиваний тела: по ним видно, израсходована
     // ли аннотация. Без этого `// @type` цеплялась к каждому присваиванию в
@@ -241,26 +323,31 @@ fn build_scope(
         // 4. return-type tracking (Уровень 2.5, только level>=3). Резолвим
         // только когда RHS — чистая цепочка вызовов/обращений к членам:
         // либо длиной >=2 звена (`obj.Метод()`), либо одиночный вызов
-        // глобального метода (`ГлобальныйМетод()`). Опирается на vars,
-        // уже собранные предыдущими присваиваниями (однопроходный порядок).
+        // глобального метода (`ГлобальныйМетод()`). Опирается на привязки,
+        // собранные предыдущими присваиваниями (однопроходный порядок по тексту).
         // Тип может выйти составным — храним все альтернативы (issue #15).
         if typ.is_none() && level >= 3 {
             if let Some(segs) = parse_chain(rhs) {
                 if segs.len() >= 2 || (segs.len() == 1 && segs[0].is_call) {
-                    typ = resolve_chain_types(index, &vars, &segs);
+                    typ = resolve_chain_types(index, &bindings, abs_start, &segs);
                 }
             }
         }
 
         if let Some(t) = typ {
-            vars.insert(lhs.to_lowercase(), t);
+            bindings.push(VarBinding {
+                name: lhs.to_lowercase(),
+                byte: abs_start,
+                types: t,
+            });
         }
     }
 
     Scope {
         byte_start,
         byte_end,
-        vars,
+        bindings,
+        if_branches: own_branches,
     }
 }
 
@@ -402,12 +489,21 @@ pub(crate) fn primary_type(index: &PlatformIndex, raw: &str) -> Option<String> {
 /// выпадает; если выпали все — тип не выводим (`None`), и находок не будет.
 fn resolve_chain_types(
     index: &PlatformIndex,
-    vars: &HashMap<String, Vec<String>>,
+    bindings: &[VarBinding],
+    at: usize,
     segs: &[ChainSeg],
 ) -> Option<Vec<String>> {
     let head = &segs[0];
-    let mut cur = if let Some(t) = vars.get(&head.name.to_lowercase()) {
-        t.clone()
+    // Тип головы — ближайшая привязка ВЫШЕ этой строки (позиционность, issue #15,
+    // класс 1), а не последняя в процедуре.
+    let head_lower = head.name.to_lowercase();
+    let bound = bindings
+        .iter()
+        .rev()
+        .find(|b| b.name == head_lower && b.byte <= at)
+        .map(|b| b.types.clone());
+    let mut cur = if let Some(t) = bound {
+        t
     } else if head.is_call {
         let m = index.find_global_method(&head.name)?;
         types_of(index, &m.return_type)
@@ -464,7 +560,7 @@ mod tests {
         let t = map
             .type_of_var(byte_idx, var)
             .unwrap_or_else(|| panic!("var '{var}' not found in scope"));
-        assert_eq!(t, &vec![expected_type.to_string()]);
+        assert_eq!(t, vec![expected_type.to_string()]);
     }
 
     fn method(name: &str, return_type: &str) -> Method {
@@ -571,13 +667,25 @@ mod tests {
         assert!(segs[1].is_call);
     }
 
+    /// Привязки для теста: имя → тип, байты по порядку (1, 2, 3 …).
+    fn bindings_of(pairs: &[(&str, &str)]) -> Vec<VarBinding> {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (name, ty))| VarBinding {
+                name: name.to_lowercase(),
+                byte: i + 1,
+                types: vec![ty.to_string()],
+            })
+            .collect()
+    }
+
     #[test]
     fn resolve_chain_method_return_type() {
         let idx = mock_index();
-        let vars = HashMap::new();
         let segs = parse_chain("Запрос.Выполнить()").unwrap();
         assert_eq!(
-            resolve_chain_types(&idx, &vars, &segs),
+            resolve_chain_types(&idx, &[], 100, &segs),
             Some(vec!["РезультатЗапроса".to_string()])
         );
     }
@@ -585,10 +693,9 @@ mod tests {
     #[test]
     fn resolve_chain_multi_level() {
         let idx = mock_index();
-        let vars = HashMap::new();
         let segs = parse_chain("Запрос.Выполнить().Выбрать()").unwrap();
         assert_eq!(
-            resolve_chain_types(&idx, &vars, &segs),
+            resolve_chain_types(&idx, &[], 100, &segs),
             Some(vec!["ВыборкаИзРезультатаЗапроса".to_string()])
         );
     }
@@ -596,19 +703,46 @@ mod tests {
     #[test]
     fn resolve_chain_via_var_and_property() {
         let idx = mock_index();
-        let mut vars: HashMap<String, Vec<String>> = HashMap::new();
-        vars.insert("рез".to_string(), vec!["РезультатЗапроса".to_string()]);
-        // голова — переменная с выведенным типом
+        // Голова — переменная с выведенным типом (привязка выше точки).
+        let vars = bindings_of(&[("рез", "РезультатЗапроса")]);
         let segs = parse_chain("Рез.Выбрать()").unwrap();
         assert_eq!(
-            resolve_chain_types(&idx, &vars, &segs),
+            resolve_chain_types(&idx, &vars, 100, &segs),
             Some(vec!["ВыборкаИзРезультатаЗапроса".to_string()])
         );
-        // свойство → type_name
+        // Свойство → type_name.
         let segs2 = parse_chain("Запрос.Текст").unwrap();
         assert_eq!(
-            resolve_chain_types(&idx, &vars, &segs2),
+            resolve_chain_types(&idx, &vars, 100, &segs2),
             Some(vec!["Строка".to_string()])
+        );
+    }
+
+    /// Issue #15, класс 1: тип берётся из ближайшего присваивания ВЫШЕ точки, а
+    /// не из последнего в процедуре.
+    #[test]
+    fn chain_resolution_is_positional() {
+        let idx = mock_index();
+        // `рез` сначала был числами (тип неизвестен), потом получил РезультатЗапроса.
+        let vars = vec![
+            VarBinding {
+                name: "рез".to_string(),
+                byte: 10,
+                types: vec!["Строка".to_string()],
+            },
+            VarBinding {
+                name: "рез".to_string(),
+                byte: 50,
+                types: vec!["РезультатЗапроса".to_string()],
+            },
+        ];
+        let segs = parse_chain("Рез.Выбрать()").unwrap();
+        // Между привязками (после 10, до 50) типа РезультатЗапроса ещё нет.
+        assert_eq!(resolve_chain_types(&idx, &vars, 30, &segs), None);
+        // После второй привязки — уже есть.
+        assert_eq!(
+            resolve_chain_types(&idx, &vars, 60, &segs),
+            Some(vec!["ВыборкаИзРезультатаЗапроса".to_string()])
         );
     }
 
@@ -632,10 +766,9 @@ mod tests {
             )],
         ));
 
-        let vars = HashMap::new();
         let segs = parse_chain("ПараметрыВыполненияКоманды.Источник").unwrap();
         assert_eq!(
-            resolve_chain_types(&idx, &vars, &segs),
+            resolve_chain_types(&idx, &[], 100, &segs),
             Some(vec![
                 "ОкноКлиентскогоПриложения".to_string(),
                 "ФормаКлиентскогоПриложения".to_string()
@@ -674,10 +807,9 @@ mod tests {
     #[test]
     fn resolve_chain_global_method() {
         let idx = mock_index();
-        let vars = HashMap::new();
         let segs = parse_chain("ПолучитьОбщийМакет()").unwrap();
         assert_eq!(
-            resolve_chain_types(&idx, &vars, &segs),
+            resolve_chain_types(&idx, &[], 100, &segs),
             Some(vec!["ТабличныйДокумент".to_string()])
         );
     }
@@ -685,9 +817,8 @@ mod tests {
     #[test]
     fn resolve_chain_unknown_member_returns_none() {
         let idx = mock_index();
-        let vars = HashMap::new();
         let segs = parse_chain("Запрос.НетТакогоМетода()").unwrap();
-        assert_eq!(resolve_chain_types(&idx, &vars, &segs), None);
+        assert_eq!(resolve_chain_types(&idx, &[], 100, &segs), None);
     }
 
     #[test]
@@ -696,7 +827,7 @@ mod tests {
         let src = "Запрос = Новый Запрос;\nРез = Запрос.Выполнить();\nВыб = Рез.Выбрать();\n";
         let annotations = HashMap::new();
         // level=3 — цепочки выводятся
-        let map3 = extract_scope_map(&idx, src, &annotations, 3);
+        let map3 = extract_scope_map(&idx, src, &annotations, 3, &[]);
         assert_var(&map3, src.len() - 1, "запрос", "Запрос");
         assert_var(&map3, src.len() - 1, "рез", "РезультатЗапроса");
         assert_var(&map3, src.len() - 1, "выб", "ВыборкаИзРезультатаЗапроса");
@@ -708,7 +839,7 @@ mod tests {
         let src = "Запрос = Новый Запрос;\nРез = Запрос.Выполнить();\n";
         let annotations = HashMap::new();
         // level=2 — return-type НЕ выводится (регрессия не должна появиться)
-        let map2 = extract_scope_map(&idx, src, &annotations, 2);
+        let map2 = extract_scope_map(&idx, src, &annotations, 2, &[]);
         assert_var(&map2, src.len() - 1, "запрос", "Запрос"); // из Новый — есть
         assert!(map2.type_of_var(src.len() - 1, "рез").is_none()); // из вызова — нет на level=2
     }
