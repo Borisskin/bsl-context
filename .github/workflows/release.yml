@@ -26,13 +26,17 @@ permissions:
   contents: write   # нужно для загрузки ассетов в Release
 
 jobs:
-  # Релиз создаётся ОДИН раз и до сборок. Раньше его создавала каждая из четырёх
-  # параллельных работ — если готового ещё не видно. На v0.8.0 все четыре стартовали
-  # в одну секунду, две успели создать по объекту релиза, и macOS (самая долгая сборка)
-  # залила архив в свой дубль-черновик, а на публикации получила отказ
+  # Релиз создаётся ОДИН раз и до сборок, но ЧЕРНОВИКОМ. Раньше его создавала каждая
+  # из четырёх параллельных работ — если готового ещё не видно. На v0.8.0 все четыре
+  # стартовали в одну секунду, две успели создать по объекту релиза, и macOS (самая
+  # долгая сборка) залила архив в свой дубль-черновик, а на публикации получила отказ
   # `already_exists: tag_name`. Итог: работа упала, архив под macOS в релиз не попал.
+  #
+  # Черновик снимается отдельной работой `publish` ТОЛЬКО после успешной сборки всех
+  # архивов: на v0.21.4 обе сборки упали (устаревший Cargo.lock), а релиз уже был
+  # создан опубликованным — пользователи увидели релиз без единого ассета.
   create-release:
-    name: Создать Release
+    name: Создать Release (черновик)
     runs-on: ubuntu-latest
     steps:
       - name: Определить тег
@@ -41,7 +45,7 @@ jobs:
 
       # Идемпотентно: при повторном запуске (workflow_dispatch на существующий тег)
       # ничего не пересоздаётся, заметки релиза не затираются.
-      - name: Создать релиз, если его ещё нет
+      - name: Создать черновик релиза, если его ещё нет
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -49,7 +53,7 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Релиз $TAG уже существует — создавать не нужно."
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --draft
           fi
 
   build:
@@ -136,3 +140,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ steps.tag.outputs.tag }}" "$ASSET" --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Публикация — только после того, как ВСЕ архивы собраны и залиты. Если хотя бы
+  # одна сборка упала, релиз остаётся черновиком: пользователи не видят релиз без
+  # ассетов, а перезапуск работы (workflow_dispatch) доводит дело до конца.
+  publish:
+    name: Опубликовать Release
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Определить тег
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Снять черновик
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ steps.tag.outputs.tag }}" --draft=false --repo "$GITHUB_REPOSITORY"

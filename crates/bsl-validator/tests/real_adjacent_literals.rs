@@ -72,3 +72,56 @@ fn issue21_real_argument_mismatch_is_still_reported() {
     assert_eq!(found.len(), 1, "ожидалась одна находка: {found:#?}");
     assert_eq!(found[0].0, ExprErrorKind::WrongArgumentCount);
 }
+
+/// Issue #26: запятые ВНУТРИ литерала-продолжения не делают его отдельным
+/// аргументом. Грамматика режет второй литерал по запятым, и корректный код
+/// получал `wrong_argument_count` с `confidence: high`.
+#[test]
+fn issue26_commas_inside_adjacent_literals_are_not_arguments() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let src = "\
+Процедура Тест()
+	Т = НСтр(\"a\"
+\"b, c, d\");
+	Д = СтрДлина(\"a\"
+\"b, c\");
+	Т2 = НСтр(\"a, b, c\");
+	Т3 = НСтр(\"a
+|b, c, d\");
+КонецПроцедуры
+";
+    for level in [1u8, 3] {
+        let found = findings(&index, src, level);
+        assert!(
+            found.is_empty(),
+            "level={level}: запятые внутри литералов — не аргументы: {found:#?}"
+        );
+    }
+}
+
+/// Реальный вызов из issue #26: многострочный `НСтр` с запятыми и вторым
+/// аргументом — два аргумента, а не пять.
+#[test]
+fn issue26_real_multiline_nstr_is_clean() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let src = "\
+Процедура Тест()
+	ОбщегоНазначения.СообщитьОбОшибке(НСтр(\"ru='Не удалось заблокировать %1: %2, для изменения основного банковского счета, по причине:'\"
+\"%3';uk='Не вдалося заблокувати %1: %2, для зміни основного банківського рахунку, через:'\"
+\"%3'\", ОбщегоНазначения.КодОсновногоЯзыка()));
+КонецПроцедуры
+";
+    let found = findings(&index, src, 3);
+    let argument_noise: Vec<_> = found
+        .iter()
+        .filter(|(kind, _)| *kind == ExprErrorKind::WrongArgumentCount)
+        .collect();
+    assert!(
+        argument_noise.is_empty(),
+        "НСтр из трёх литералов с запятыми — два аргумента: {argument_noise:#?}"
+    );
+}
