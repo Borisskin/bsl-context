@@ -415,6 +415,7 @@ async fn validate_module_reconnects_source_on_demand() {
             source: "Процедура Тест()\n\tИмяИзГло();\nКонецПроцедуры".into(),
             level: None,
             profile: None,
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: Some("ut".to_string()),
@@ -453,6 +454,7 @@ async fn validate_module_rejects_unknown_repo() {
             source: "Процедура Тест()\nКонецПроцедуры".into(),
             level: None,
             profile: None,
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: Some("нет-такого".to_string()),
@@ -484,6 +486,7 @@ async fn validate_module_requires_repo_when_sources_configured() {
             source: "Процедура Тест()\nКонецПроцедуры".into(),
             level: None,
             profile: None,
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: None,
@@ -507,6 +510,7 @@ async fn validate_module_without_sources_checks_platform_only() {
             source: "Процедура Тест()\n\tА = ТипРазмещенияТекстаТабличногоДокумента.Перенос;\nКонецПроцедуры".into(),
             level: None,
             profile: None,
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: None,
@@ -541,6 +545,7 @@ async fn validate_module_degrades_when_lite_index_not_built() {
             source: "Процедура Тест()\nКонецПроцедуры".into(),
             level: None,
             profile: None,
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: Some("ut".to_string()),
@@ -591,6 +596,7 @@ async fn validate_module_degraded_still_finds_invented_call() {
             source: "Функция ПолучитьДанные() Экспорт\n\tВозврат СЕГОДНЯ();\nКонецФункции".into(),
             level: None,
             profile: Some("full".to_string()),
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: Some("ut".to_string()),
@@ -653,6 +659,7 @@ async fn validate_module_degraded_has_no_high_undeclared() {
                 .into(),
             level: None,
             profile: Some("full".to_string()),
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: Some("ut".to_string()),
@@ -762,6 +769,7 @@ async fn validate_module_rejects_repo_when_no_sources_configured() {
             source: "Процедура Тест()\nКонецПроцедуры".into(),
             level: None,
             profile: None,
+            path: None,
             module_path: None,
             form_attributes: None,
             repo: Some("ut".to_string()),
@@ -995,5 +1003,148 @@ async fn reload_config_without_config_path_reports_refusal() {
     assert!(
         v["message"].as_str().unwrap().contains("без --config"),
         "сообщение: {json}"
+    );
+}
+
+// ── Issue #13: проверка модуля по пути к файлу ─────────────────────────────
+
+/// Сервер с единственным источником имён, у которого задан корень выгрузки.
+/// Источник при этом не поднят (базы нет) — файл всё равно обязан прочитаться,
+/// а ответ обязан нести отпечаток прочитанного.
+async fn server_with_root(root: &std::path::Path) -> Option<BslContextServer> {
+    let srv = make_server().await?;
+    let cfg = bsl_context_server::config::SymbolSourceConfig {
+        kind: "lite".to_string(),
+        db_path: Some(root.join("нет-такой-базы.db")),
+        root: Some(root.to_path_buf()),
+        repo: Some("ut".to_string()),
+        ..Default::default()
+    };
+    Some(srv.with_sources(vec![(
+        "ut".to_string(),
+        cfg,
+        Err("база не собрана".to_string()),
+    )]))
+}
+
+#[tokio::test]
+async fn validate_module_by_path_reads_file_and_reports_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let nested = root
+        .join("base")
+        .join("CommonModules")
+        .join("Тест")
+        .join("Ext");
+    std::fs::create_dir_all(&nested).unwrap();
+    let module = nested.join("Module.bsl");
+    std::fs::write(
+        &module,
+        "Процедура Тест()\n\tХ = Новый НетТакогоТипа;\nКонецПроцедуры\n",
+    )
+    .unwrap();
+
+    let Some(srv) = server_with_root(root).await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let json = srv
+        .validate_module(Parameters(ValidateModuleParams {
+            source: String::new(),
+            path: Some("base/CommonModules/Тест/Ext/Module.bsl".to_string()),
+            level: Some(3),
+            profile: Some("full".to_string()),
+            module_path: None,
+            form_attributes: None,
+            repo: Some("ut".to_string()),
+        }))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    // module_path выведен из пути — модуль формы распознаётся сам, без параметра.
+    assert_eq!(
+        v["source_module_path"], "base/CommonModules/Тест/Ext/Module.bsl",
+        "ответ: {json}"
+    );
+    assert!(v["source_path"].as_str().unwrap().ends_with("Module.bsl"));
+    assert_eq!(
+        v["source_bytes"].as_u64().unwrap(),
+        std::fs::metadata(&module).unwrap().len(),
+        "ответ: {json}"
+    );
+    assert!(v["source_modified"].as_str().is_some(), "ответ: {json}");
+
+    // Текст дошёл до валидатора: несуществующий конструктор — находка.
+    assert!(
+        v["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["kind"] == "unknown_new_type"),
+        "ответ: {json}"
+    );
+}
+
+#[tokio::test]
+async fn validate_module_by_path_refuses_file_outside_root() {
+    let root_dir = tempfile::tempdir().unwrap();
+    let outside_dir = tempfile::tempdir().unwrap();
+    let alien = outside_dir.path().join("Чужой.bsl");
+    std::fs::write(&alien, "Процедура Тест()\nКонецПроцедуры\n").unwrap();
+
+    let Some(srv) = server_with_root(root_dir.path()).await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    for candidate in [
+        alien.to_string_lossy().to_string(),
+        "../Чужой.bsl".to_string(),
+    ] {
+        let json = srv
+            .validate_module(Parameters(ValidateModuleParams {
+                source: String::new(),
+                path: Some(candidate.clone()),
+                level: None,
+                profile: None,
+                module_path: None,
+                form_attributes: None,
+                repo: Some("ut".to_string()),
+            }))
+            .await;
+        assert!(
+            json.contains("выходит за корень") || json.contains("файл не найден"),
+            "путь {candidate} должен быть отвергнут: {json}"
+        );
+    }
+}
+
+/// Путь в `source` — отказ, а не молчаливое `valid: true` (issue #13).
+#[tokio::test]
+async fn validate_module_refuses_path_passed_as_source() {
+    let Some(srv) = make_server().await else {
+        eprintln!("skip: hbk не найден");
+        return;
+    };
+    let json = srv
+        .validate_module(Parameters(ValidateModuleParams {
+            source: r"b:\projects\x\src\cf\CommonModules\НетТакогоМодуля\Ext\Module.bsl"
+                .to_string(),
+            path: None,
+            level: Some(3),
+            profile: Some("full".to_string()),
+            module_path: None,
+            form_attributes: None,
+            repo: None,
+        }))
+        .await;
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], false, "ответ: {json}");
+    assert!(
+        v["message"].as_str().unwrap().contains("ПУТЬ к файлу"),
+        "сообщение: {json}"
+    );
+    assert!(
+        v.get("valid").is_none(),
+        "вместо ложного valid: true должен быть отказ: {json}"
     );
 }
