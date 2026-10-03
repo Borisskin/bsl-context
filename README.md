@@ -50,6 +50,17 @@ cannot tell an object module from an arbitrary fragment and assumes there is no
 implicit object context: calls on attributes and tabular sections
 (`Товары.Очистить()`) then produce an `unknown_common_module` finding.
 
+The module source is exactly one of two: `source` (text) or `path` (a `.bsl` file
+inside the configuration dump root — the `root` field of the name source). In the
+latter case the server reads the file itself, so a module of hundreds of kilobytes
+does not have to travel through the model context: `module_path` is derived from the
+path automatically, and the response gains `source_path`, `source_module_path`,
+`source_bytes`, and `source_modified`, so you can see which version of the file was
+checked. A path is resolved only inside the dump root (symbolic links and junctions
+are resolved before the check), and only `.bsl` files are read. A string that looks
+like a file path in `source` is rejected with an explanation: previously it was
+parsed as BSL and returned `valid: true` without a single check.
+
 | Finding kind | confidence | Meaning |
 |--------------|-----------|---------|
 | `unknown_enum_value` | high | System enumeration value does not exist. Open collections (`ЦветаСтиля`, `БиблиотекаКартинок` — the configuration adds its own values) are not checked |
