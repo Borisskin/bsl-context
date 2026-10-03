@@ -48,6 +48,7 @@ fn validate_params(source: &str) -> ValidateModuleParams {
         source: source.to_string(),
         level: Some(3),
         profile: Some("full".to_string()),
+        path: None,
         module_path: None,
         form_attributes: None,
         repo: None,
@@ -178,6 +179,40 @@ async fn collect_responses(srv: &BslContextServer) -> Vec<(&'static str, String)
         "validate_module_clean",
         srv.validate_module(Parameters(validate_params(CLEAN_MODULE)))
             .await,
+    ));
+
+    // Issue #13: источник модуля — текст или файл, и оба отказа на неверный вызов.
+    // Кейсы гоняются и на пустом индексе (в CI), поэтому сторожат тексты отказов.
+    out.push((
+        "validate_module_path_in_source",
+        srv.validate_module(Parameters(validate_params(
+            r"b:\projects\x\src\cf\CommonModules\НетТакогоМодуля\Ext\Module.bsl",
+        )))
+        .await,
+    ));
+    out.push((
+        "validate_module_no_source",
+        srv.validate_module(Parameters(ValidateModuleParams {
+            path: None,
+            ..validate_params("")
+        }))
+        .await,
+    ));
+    out.push((
+        "validate_module_path_without_root",
+        srv.validate_module(Parameters(ValidateModuleParams {
+            path: Some("base/CommonModules/Х/Ext/Module.bsl".to_string()),
+            ..validate_params("")
+        }))
+        .await,
+    ));
+    out.push((
+        "validate_module_both_sources",
+        srv.validate_module(Parameters(ValidateModuleParams {
+            path: Some("base/CommonModules/Х/Ext/Module.bsl".to_string()),
+            ..validate_params(CLEAN_MODULE)
+        }))
+        .await,
     ));
 
     out.push(("reserved_names", srv.reserved_names().await));

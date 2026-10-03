@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bsl_validator::{
     validate_enum, validate_method_call, validate_module_degraded, validate_module_with_profile,
-    validate_module_with_symbols, Profile, SymbolSource, FORM_TYPE,
+    validate_module_with_symbols, ExpressionValidation, Profile, SymbolSource, FORM_TYPE,
 };
 use platform_index::{format, Definition, PlatformIndex, SearchEngine};
 use rmcp::{
@@ -24,6 +24,8 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::module_source::{self, ModuleFile};
 
 /// Слот одного источника имён: конфиг, сам источник (пересборка подменяет его на
 /// ходу) и флаг «идёт пересборка». Флаг на слот, а не на сервер: пересборка индекса
@@ -710,12 +712,49 @@ fn err_json(message: &str) -> String {
     serde_json::json!({"ok": false, "message": message}).to_string()
 }
 
+/// Ответ `validate_module` для проверки по файлу: результат валидатора плюс
+/// отпечаток прочитанного файла (issue #13). `flatten` оставляет поля результата
+/// на верхнем уровне — ровно как в ответе по тексту, — а отпечаток добавляется
+/// рядом: видно, какая версия файла проверена.
+#[derive(Serialize)]
+struct FileValidation<'a> {
+    #[serde(flatten)]
+    result: &'a ExpressionValidation,
+    /// Полный путь прочитанного файла.
+    source_path: String,
+    /// Путь, ушедший в `module_path` (относительно корня выгрузки).
+    source_module_path: String,
+    /// Размер файла в байтах.
+    source_bytes: u64,
+    /// Время изменения файла, RFC3339 UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_modified: Option<String>,
+}
+
+/// Сериализация результата: с отпечатком файла, если модуль читался с диска.
+/// Без файла ответ побайтово тот же, что и раньше (поля отпечатка не появляются),
+/// — эталоны ответов инструментов на этом и держатся.
+fn validation_json(result: &ExpressionValidation, file: Option<&ModuleFile>) -> String {
+    let Some(file) = file else {
+        return serde_json::to_string_pretty(result).unwrap_or_else(|_| "{}".to_string());
+    };
+    let payload = FileValidation {
+        result,
+        source_path: file.path.display().to_string(),
+        source_module_path: file.module_path.clone(),
+        source_bytes: file.bytes,
+        source_modified: file.modified.clone(),
+    };
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+}
+
 /// Проверка модуля, когда источник имён настроен, но недоступен.
 ///
 /// Собрана в одном месте, потому что случаев четыре (источник не поднят,
 /// lite-индекс не собран, источник нездоров, источник отвалился по ходу
 /// проверки), а ответ у всех один: находки против платформенного контекста
 /// плюс `symbols_available: false` и причина.
+#[allow(clippy::too_many_arguments)]
 fn degraded_json(
     index: &PlatformIndex,
     source: &str,
@@ -723,6 +762,7 @@ fn degraded_json(
     profile: Profile,
     module_path: Option<&str>,
     form_attributes: Option<&HashSet<String>>,
+    file: Option<&ModuleFile>,
     reason: String,
 ) -> String {
     let result = validate_module_degraded(
@@ -734,7 +774,7 @@ fn degraded_json(
         form_attributes,
         reason,
     );
-    serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+    validation_json(&result, file)
 }
 
 // ── Параметры tools ────────────────────────────────────────────────────────
@@ -797,7 +837,13 @@ pub struct ValidateModuleParams {
     /// произвольный фрагмент. У целого модуля валидатор сам извлекает через
     /// tree-sitter объявленные процедуры/функции и не путает их вызовы с
     /// опечатками платформенных методов; у фрагмента этот список просто пуст.
+    ///
+    /// Взаимоисключающе с `path`: передайте ровно одно из двух (пустой `source`
+    /// считается непереданным). Строка, похожая на путь к файлу, здесь
+    /// отвергается с понятным текстом — раньше она разбиралась как BSL и давала
+    /// `valid: true` без единой проверки (issue #13).
     #[serde(
+        default,
         alias = "bslModule",
         alias = "module",
         alias = "bslSnippet",
@@ -805,6 +851,17 @@ pub struct ValidateModuleParams {
         alias = "code"
     )]
     pub source: String,
+    /// Путь к файлу модуля вместо текста: абсолютный или относительно корня
+    /// выгрузки конфигурации (поле `root` источника имён для `repo`). Сервер
+    /// читает файл сам — модуль на 120 КБ не нужно прогонять через свой контекст.
+    ///
+    /// Файл обязан лежать ВНУТРИ корня выгрузки (символические ссылки и junction'ы
+    /// разрешаются до проверки), проверяются только `.bsl`. `module_path` при этом
+    /// выводится из пути сам — проверки модуля формы и объектного контекста
+    /// включаются без отдельного параметра. В ответе — путь, размер и время
+    /// изменения файла, чтобы было видно, какая версия проверена.
+    #[serde(alias = "file", alias = "modulePathFile")]
+    pub path: Option<String>,
     /// Уровень валидации:
     /// `1` (default) — статический анализ ссылок с явным именем типа в исходнике;
     /// `2` — дополнительно локальный type inference (Phase 8 MVP) для переменных,
@@ -833,6 +890,9 @@ pub struct ValidateModuleParams {
     /// фрагмента и считает, что неявного контекста объекта нет: обращения к
     /// реквизитам и табличным частям (`Товары.Очистить()`) тогда дают находку
     /// `unknown_common_module`.
+    ///
+    /// При проверке по `path` выводится из пути автоматически; явно переданное
+    /// значение приоритетнее выведенного.
     #[serde(alias = "modulePath")]
     pub module_path: Option<String>,
     /// Имена реквизитов формы (`Объект`, `Список`, свои реквизиты). Реквизит
@@ -1000,6 +1060,13 @@ impl BslContextServer {
                        глобальных функций; опечатки платформенных методов и директив (fuzzy-сходство). \
                        Объявленные в самом тексте Процедура/Функция извлекаются через tree-sitter, их \
                        вызовы не считаются опечатками. У каждой находки есть поле confidence (high/low). \
+                       Источник модуля — ровно один: source (текст BSL) или path (файл .bsl внутри корня \
+                       выгрузки конфигурации, поле root источника имён; читает сервер, поэтому большой \
+                       модуль не нужно прогонять через контекст модели). При path параметр module_path \
+                       выводится из пути сам, а в ответе появляются source_path, source_module_path, \
+                       source_bytes и source_modified — видно, какая версия файла проверена. Строка, \
+                       похожая на путь к файлу, в source отвергается с объяснением: раньше она \
+                       разбиралась как BSL и давала valid: true без единой проверки. \
                        Параметр level: 1 (default) — только явные имена типов, включая тип переменной из \
                        конструктора (Х = Новый ТипX); 2 — плюс локальный вывод типа переменных; 3 — плюс \
                        тип из возвращаемых значений. Имя переменной, совпавшее с именем платформенного \
@@ -1033,6 +1100,28 @@ impl BslContextServer {
             Some(ref s) => Profile::parse_or_default(Some(s)),
             None => self.default_profile,
         };
+        // Источник модуля — ровно один: текст (`source`) или файл (`path`).
+        // Пустой `source` считается непереданным: клиент, знающий только путь к
+        // модулю, не обязан присылать текст. Строка-путь в `source` отвергается
+        // здесь же: раньше она разбиралась как BSL и давала `valid: true` без
+        // единой проверки (issue #13).
+        let source_given = !p.source.trim().is_empty();
+        let path_given = p.path.is_some();
+        if source_given && path_given {
+            return err_json(
+                "передайте ровно один источник модуля: source (текст модуля) или path (файл \
+                 внутри корня выгрузки конфигурации).",
+            );
+        }
+        if !source_given && !path_given {
+            return err_json(
+                "нужен либо source (текст модуля), либо path (файл внутри корня выгрузки \
+                 конфигурации).",
+            );
+        }
+        if source_given && module_source::looks_like_path(&p.source) {
+            return err_json(&module_source::path_in_source_message(&p.source));
+        }
         // Ни одной конфигурации не настроено И клиент не просил repo — обычная проверка
         // против справки платформы, как до появления параметра repo. Остальные случаи
         // (сервер пуст, но repo передан; сервер настроен) идут через resolve_slot — он
@@ -1045,6 +1134,35 @@ impl BslContextServer {
                 Err(msg) => return err_json(&msg),
             }
         };
+        // Модуль можно прочитать с диска: файл обязан лежать ВНУТРИ корня выгрузки
+        // конфигурации (поле `root` источника имён) — иначе инструмент стал бы
+        // средством чтения любых файлов машины.
+        let from_file: Option<ModuleFile> = match p.path.as_deref() {
+            Some(raw) => {
+                let root = slot.as_ref().and_then(|s| s.config.root.as_deref());
+                let Some(root) = root else {
+                    return err_json(
+                        "параметр path требует источника имён с полем root — корнем выгрузки \
+                         конфигурации: добавьте root в секцию [symbol_source] или \
+                         [[symbol_sources]] для нужного repo.",
+                    );
+                };
+                match module_source::read_module(root, raw) {
+                    Ok(module) => Some(module),
+                    Err(message) => return err_json(&message),
+                }
+            }
+            None => None,
+        };
+        let source_text: &str = match from_file.as_ref() {
+            Some(module) => module.text.as_str(),
+            None => p.source.as_str(),
+        };
+        // Явный module_path клиента приоритетнее выведенного из пути файла.
+        let module_path: Option<String> = p
+            .module_path
+            .clone()
+            .or_else(|| from_file.as_ref().map(|m| m.module_path.clone()));
         // Реквизиты формы сверяются регистронезависимо, как и всё в BSL.
         let form_attributes: Option<HashSet<String>> = p
             .form_attributes
@@ -1054,13 +1172,13 @@ impl BslContextServer {
         let Some(slot) = slot else {
             let result = validate_module_with_profile(
                 &self.index,
-                &p.source,
-                p.module_path.as_deref(),
+                source_text,
+                module_path.as_deref(),
                 form_attributes.as_ref(),
                 level,
                 profile,
             );
-            return serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string());
+            return validation_json(&result, from_file.as_ref());
         };
         // Слот найден по точному совпадению repo — значит параметр был Some.
         let repo = p.repo.as_deref().unwrap_or_default();
@@ -1109,11 +1227,12 @@ impl BslContextServer {
                 };
                 return degraded_json(
                     &self.index,
-                    &p.source,
+                    source_text,
                     level,
                     profile,
-                    p.module_path.as_deref(),
+                    module_path.as_deref(),
                     form_attributes.as_ref(),
+                    from_file.as_ref(),
                     reason,
                 );
             }
@@ -1121,11 +1240,12 @@ impl BslContextServer {
         if !source.is_healthy() {
             return degraded_json(
                 &self.index,
-                &p.source,
+                source_text,
                 level,
                 profile,
-                p.module_path.as_deref(),
+                module_path.as_deref(),
                 form_attributes.as_ref(),
+                from_file.as_ref(),
                 format!(
                     "источник имён конфигурации \"{repo}\" недоступен: {}. Переподключение \
                      пробовали, оно не удалось — проверьте code-index; следующая попытка \
@@ -1139,10 +1259,10 @@ impl BslContextServer {
         }
         let result = validate_module_with_symbols(
             &self.index,
-            &p.source,
+            source_text,
             level,
             profile,
-            p.module_path.as_deref(),
+            module_path.as_deref(),
             form_attributes.as_ref(),
             Some(source.as_ref()),
         );
@@ -1153,11 +1273,12 @@ impl BslContextServer {
             // против одной платформы — там таких находок не будет по построению.
             return degraded_json(
                 &self.index,
-                &p.source,
+                source_text,
                 level,
                 profile,
-                p.module_path.as_deref(),
+                module_path.as_deref(),
                 form_attributes.as_ref(),
+                from_file.as_ref(),
                 format!(
                     "источник имён конфигурации \"{repo}\" отвалился во время проверки: {}. \
                      Результат пересчитан только против платформенного контекста — проверьте \
@@ -1166,7 +1287,7 @@ impl BslContextServer {
                 ),
             );
         }
-        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+        validation_json(&result, from_file.as_ref())
     }
 
     #[tool(

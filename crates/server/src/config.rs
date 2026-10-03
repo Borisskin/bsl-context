@@ -95,9 +95,10 @@ pub struct SymbolSourceConfig {
     pub kind: String,
     /// Абсолютный путь к базе: файл lite-индекса либо `<repo>/.code-index/index.db`.
     pub db_path: Option<PathBuf>,
-    /// Корень выгрузки конфигурации. Нужен ТОЛЬКО инструменту `rebuild_symbol_index`
-    /// при `kind = "lite"`: из него собирается облегчённый индекс. Валидация имён
-    /// файловую систему не трогает — читает только базу/сервис.
+    /// Корень выгрузки конфигурации. Нужен инструменту `rebuild_symbol_index`
+    /// при `kind = "lite"` (из него собирается облегчённый индекс) и инструменту
+    /// `validate_module` с параметром `path`: модуль читается только внутри этого
+    /// корня. Проверка по тексту (`source`) файловую систему не трогает.
     pub root: Option<PathBuf>,
     /// URL MCP-сервера code-index, например http://127.0.0.1:8011/mcp
     pub url: Option<String>,
