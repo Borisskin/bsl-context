@@ -10,10 +10,10 @@ name = "bsl-context-rs"
 path = "src/main.rs"
 
 [dependencies]
-platform-index = { path = "../platform-index", version = "0.21.2" }
-bsl-validator  = { path = "../bsl-validator", version = "0.21.2" }
-symbol-source  = { path = "../symbol-source", version = "0.21.2" }
-lite-index     = { path = "../lite-index", version = "0.21.2" }
+platform-index = { path = "../platform-index", version = "0.21.3" }
+bsl-validator  = { path = "../bsl-validator", version = "0.21.3" }
+symbol-source  = { path = "../symbol-source", version = "0.21.3" }
+lite-index     = { path = "../lite-index", version = "0.21.3" }
 
 tokio = { workspace = true }
 axum = { workspace = true }
