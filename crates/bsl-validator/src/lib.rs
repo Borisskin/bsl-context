@@ -9,6 +9,7 @@ pub mod context_names;
 pub mod declarations;
 pub mod directives;
 pub mod expression;
+pub mod homoglyphs;
 pub(crate) mod locals;
 pub mod module;
 pub mod query_rules;

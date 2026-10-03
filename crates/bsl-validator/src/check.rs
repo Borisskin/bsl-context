@@ -91,8 +91,14 @@ pub fn validate_enum(index: &PlatformIndex, type_name: &str, value_name: &str) -
     }
 
     let value_lower = value_name.to_lowercase();
+    // Имена сверяются после сведения латинско-кириллических двойников: в справке
+    // 8.3.17 значение `РежимОткрытияОкнаФормы.БлокироватьВесьИнтерфейс` записано
+    // с ЛАТИНСКОЙ `c`, а платформа принимает кириллическую. Без сведения
+    // корректный код получал находку `high`, а подсказка предлагала имя, которое
+    // платформа отвергает (issue #18).
     let valid = ty.enum_values.iter().any(|v| {
-        v.name_ru.to_lowercase() == value_lower || v.name_en.to_lowercase() == value_lower
+        crate::homoglyphs::same_after_fold(&v.name_ru, value_name)
+            || crate::homoglyphs::same_after_fold(&v.name_en, value_name)
     });
 
     let all_valid_values: Vec<String> = ty.enum_values.iter().map(|v| v.name_ru.clone()).collect();
@@ -297,6 +303,12 @@ fn top_similar(query: &str, values: &[platform_index::EnumValue], top: usize) ->
             [v.name_ru.as_str(), v.name_en.as_str()]
                 .into_iter()
                 .filter(|n| !n.is_empty())
+                // Опечатку справки со смешанными алфавитами (`БлокироватьВеcьИнтерфейс`)
+                // в подсказку не отдаём: её повторят в коде дословно, а платформа
+                // такое имя не примет. Заодно отсеиваем имя, которое после сведения
+                // двойников совпадает с написанным — это то же самое имя (issue #18).
+                .filter(|n| !crate::homoglyphs::is_mixed_alphabet(n))
+                .filter(|n| !crate::homoglyphs::same_after_fold(n, query))
                 .map(move |n| {
                     (
                         similarity_score(query, &n.to_lowercase()),
@@ -410,6 +422,42 @@ mod tests {
         assert_eq!(parse_range_upper("Значение1-Значение10"), Some(10));
         assert_eq!(parse_range_upper("Шаблон"), None);
         assert_eq!(parse_range_upper("Параметр2-Параметр7"), Some(7));
+    }
+
+    /// Issue #18: в справке платформы значение записано с ЛАТИНСКОЙ буквой
+    /// (`БлокироватьВеcьИнтерфейс`), платформа принимает кириллическую. Корректный
+    /// код не должен получать находку, а подсказка — предлагать латиницу.
+    #[test]
+    fn homoglyph_in_help_name_is_not_a_finding() {
+        use platform_index::{PlatformIndex, Type};
+        let mut idx = PlatformIndex::new();
+        idx.insert_type(Type {
+            name_ru: "РежимОткрытияОкнаФормы".into(),
+            name_en: String::new(),
+            description: String::new(),
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: vec![
+                enum_v("БлокироватьВеcьИнтерфейс"), // латинская `c` — как в справке
+                enum_v("Независимый"),
+            ],
+        });
+
+        let r = validate_enum(&idx, "РежимОткрытияОкнаФормы", "БлокироватьВесьИнтерфейс");
+        assert!(
+            r.valid,
+            "кириллическое написание обязано приниматься: {r:?}"
+        );
+
+        // Настоящая опечатка по-прежнему ловится, и латиницу в подсказку не даём.
+        let bad = validate_enum(&idx, "РежимОткрытияОкнаФормы", "БлокироватьВесьИнтерфейсX");
+        assert!(!bad.valid);
+        assert!(
+            bad.similar.iter().all(|s| !s.name.contains('c')),
+            "в подсказке не должно быть имени со смешанными алфавитами: {:?}",
+            bad.similar
+        );
     }
 
     fn method_1param(name_ru: &str, param: &str, required: bool) -> platform_index::Method {
