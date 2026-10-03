@@ -83,6 +83,34 @@ fn type_member_noise_on_real_corpus() {
     let index = load_from_hbk(&hbk).expect("PlatformIndex");
     let mut files = Vec::new();
     collect_bsl(root, &mut files);
+    // Ограничение объёма — для быстрых сравнений «до/после» на части корпуса.
+    if let Ok(limit) = std::env::var("BSL_CONTEXT_CORPUS_LIMIT") {
+        if let Ok(n) = limit.parse::<usize>() {
+            files.truncate(n);
+        }
+    }
+    // Дамп всех находок — для построчного сравнения двух состояний кода.
+    let dump_path = std::env::var("BSL_CONTEXT_CORPUS_DUMP").ok();
+    let mut dump: Vec<String> = Vec::new();
+    // Шардинг для параллельного замера: `BSL_CONTEXT_CORPUS_SHARD="i/n"` оставляет
+    // каждый n-й модуль. Список обходится в детерминированном порядке, поэтому
+    // объединение шардов равно полному прогону, а время падает почти линейно:
+    // 14 943 модуля в один процесс — ~21 минута, в четыре — ~6.
+    let shard = std::env::var("BSL_CONTEXT_CORPUS_SHARD").ok();
+    if let Some((index, total)) = shard.as_deref().and_then(|s| s.split_once('/')) {
+        if let (Ok(index), Ok(total)) =
+            (index.trim().parse::<usize>(), total.trim().parse::<usize>())
+        {
+            if total > 1 && index < total {
+                files = files
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| i % total == index)
+                    .map(|(_, path)| path)
+                    .collect();
+            }
+        }
+    }
 
     // Имена, которые проверка членов может принять за платформенный тип, хотя
     // это свойство контекста: их состав показывает, сколько проверок правило
@@ -122,10 +150,24 @@ fn type_member_noise_on_real_corpus() {
             validate_module_with_profile(&index, &text, Some(&rel), None, 3, Profile::Full);
         for err in &result.errors {
             let kind = format!("{:?}", err.kind);
-            *by_kind.entry(kind).or_default() += 1;
+            *by_kind.entry(kind.clone()).or_default() += 1;
+            dump.push(format!(
+                "{rel}|{}|{}|{kind}|{}",
+                err.line, err.col, err.message
+            ));
             if err.kind == ExprErrorKind::UnknownTypeMember && samples.len() < 15 {
                 samples.push(format!("{rel}:{} — {}", err.line, err.message));
             }
+        }
+    }
+
+    if let Some(path) = dump_path {
+        let mut sorted = dump;
+        sorted.sort();
+        if let Err(e) = fs::write(&path, sorted.join("\n")) {
+            eprintln!("не удалось записать дамп {path}: {e}");
+        } else {
+            println!("дамп находок: {path} ({} строк)", sorted.len());
         }
     }
 

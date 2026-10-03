@@ -306,3 +306,99 @@ fn renamed_variable_keeps_behaviour_of_issue_controls() {
         );
     }
 }
+
+// ── Issue #15: остатки ложных unknown_type_member после 0.20.1 ─────────────
+
+/// Класс 2: члены `COMОбъект` связываются поздно, состав из справки неизвестен.
+#[test]
+fn issue15_com_object_members_are_not_checked() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let src = "\
+Процедура Тест()
+	Подключение = Новый COMОбъект(\"ADODB.Connection\");
+	Подключение.Open(\"Provider=SQLOLEDB\");
+КонецПроцедуры
+";
+    for level in [1u8, 2, 3] {
+        let found = type_member_findings(&index, src, None, level);
+        assert!(
+            found.is_empty(),
+            "level={level}: члены COM-объекта проверять нельзя: {found:#?}"
+        );
+    }
+}
+
+/// Класс 4: тип свойства составной — член проверяется по ОБЪЕДИНЕНИЮ альтернатив.
+///
+/// `ПараметрыВыполненияКоманды.Источник` — `ФормаКлиентскогоПриложения` ИЛИ
+/// `ОкноКлиентскогоПриложения`; `ИмяФормы` есть только у первой, и проверка по
+/// одной альтернативе давала ложную находку.
+#[test]
+fn issue15_composite_property_member_is_checked_across_alternatives() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let src = "\
+&НаКлиенте
+Процедура ОбработкаКоманды(ПараметрКоманды, ПараметрыВыполненияКоманды)
+	Форма = ПараметрыВыполненияКоманды.Источник;
+	Имя = Форма.ИмяФормы;
+КонецПроцедуры
+";
+    let found = type_member_findings(
+        &index,
+        src,
+        Some("Catalogs/Тест/Commands/Открыть/Ext/CommandModule.bsl"),
+        3,
+    );
+    assert!(
+        found.is_empty(),
+        "член есть у одной из альтернатив — находки быть не должно: {found:#?}"
+    );
+}
+
+/// Класс 4, обратная сторона: если члена нет ни у одной альтернативы, находка
+/// остаётся — иначе «объединение» превратилось бы в глушение проверки.
+#[test]
+fn issue15_composite_type_still_reports_unknown_member_for_all_alternatives() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let src = "\
+&НаКлиенте
+Процедура ОбработкаКоманды(ПараметрКоманды, ПараметрыВыполненияКоманды)
+	Форма = ПараметрыВыполненияКоманды.Источник;
+	Значение = Форма.НетТакогоЧленаФормы;
+КонецПроцедуры
+";
+    let found = type_member_findings(
+        &index,
+        src,
+        Some("Catalogs/Тест/Commands/Открыть/Ext/CommandModule.bsl"),
+        3,
+    );
+    assert_eq!(found.len(), 1, "ожидалась одна находка: {found:#?}");
+}
+
+/// Issue #18: значение перечисления, записанное в справке с латинской буквой,
+/// не даёт находки на корректном коде.
+#[test]
+fn issue18_enum_value_with_help_homoglyph_is_not_a_finding() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let src = "\
+&НаКлиенте
+Процедура Тест()
+	Режим = РежимОткрытияОкнаФормы.БлокироватьВесьИнтерфейс;
+КонецПроцедуры
+";
+    for level in [1u8, 3] {
+        assert!(
+            all_findings(&index, src, None, level).is_empty(),
+            "level={level}: корректное значение перечисления не должно давать находок"
+        );
+    }
+}
