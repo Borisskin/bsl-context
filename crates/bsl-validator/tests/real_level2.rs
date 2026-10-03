@@ -1,8 +1,11 @@
 //! Integration-тесты Phase 8 MVP (Уровень 2 — локальный type inference).
 //!
 //! Acceptance:
-//! 1. Опечатка в свойстве через `Запрос = Новый Запрос` ловится только на level=2.
-//! 2. На level=1 та же опечатка пропускается (head — переменная, не тип).
+//! 1. Опечатка в свойстве через `Запрос = Новый Запрос` ловится уже на level=1:
+//!    тип берётся из КОНСТРУКТОРА — это явное имя типа в исходнике, а не вывод.
+//! 2. Переменная без конструктора (`Х = Список.Отбор.Элементы.Добавить()`) на
+//!    level=1 молчит: тип в тексте не виден, а имя переменной не подставляется
+//!    вместо типа, даже если совпало с именем платформенного типа (issue #11).
 //! 3. Аннотация `// @type ТаблицаЗначений` помогает вывести тип.
 //! 4. `Х = ТипРазмещенияТекстаТабличногоДокумента.Переносить; Х.Лажа` — ловится на level=2.
 
@@ -23,39 +26,58 @@ fn hbk_path() -> Option<PathBuf> {
 }
 
 #[test]
-fn level1_misses_local_var_typo_level2_catches() {
+fn constructor_type_catches_typo_at_all_levels() {
     let Some(path) = hbk_path() else {
         eprintln!("skip: hbk не найден");
         return;
     };
     let index = load_from_hbk(&path).expect("PlatformIndex");
 
-    // Переменная с именем, отличным от имени типа — на Уровне 1 валидатор не
-    // знает её тип и пропускает опечатку. На Уровне 2 — выводит тип через
-    // 'Новый Запрос' и ловит ошибку.
+    // Тип переменной задан КОНСТРУКТОРОМ — это явное имя типа в исходнике, а не
+    // вывод типов. Поэтому опечатка ловится уже на Уровне 1, и независимо от
+    // того, совпадает ли имя переменной с именем платформенного типа.
     let src = "\
 Процедура Тест()
     МойЗапрос = Новый Запрос;
     МойЗапрос.Текстъ = \"ВЫБРАТЬ 1\";
 КонецПроцедуры";
 
-    let r1 = validate_expression_at_level(&index, src, 1);
-    println!("--- level=1 ---\n{r1:#?}");
-    // На Уровне 1 'МойЗапрос' слева — переменная, не тип, проверка скипается.
-    assert!(
-        r1.valid,
-        "level 1 не должен ловить опечатки в локальных переменных"
-    );
+    for level in [1, 2] {
+        let r = validate_expression_at_level(&index, src, level);
+        println!("--- level={level} ---\n{r:#?}");
+        let err = r
+            .errors
+            .iter()
+            .find(|e| e.kind == ExprErrorKind::UnknownTypeMember)
+            .unwrap_or_else(|| panic!("level {level}: должна быть ошибка UnknownTypeMember"));
+        assert_eq!(err.suggestion.as_deref(), Some("Текст"));
+    }
+}
 
-    let r2 = validate_expression_at_level(&index, src, 2);
-    println!("--- level=2 ---\n{r2:#?}");
-    assert!(!r2.valid, "level 2 должен поймать опечатку 'Текстъ'");
-    let err = r2
-        .errors
-        .iter()
-        .find(|e| e.kind == ExprErrorKind::UnknownTypeMember)
-        .expect("должна быть ошибка UnknownTypeMember");
-    assert_eq!(err.suggestion.as_deref(), Some("Текст"));
+#[test]
+fn variable_without_constructor_is_silent_at_level1() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    // Тип переменной в тексте не виден (результат вызова метода) — на Уровне 1
+    // проверять члены не по чему, и валидатор молчит, а не выдумывает тип по
+    // совпадению имени переменной с именем платформенного типа (issue #11:
+    // `ЭлементОтбора` — имя типа, но здесь это переменная).
+    let src = "\
+Процедура Тест()
+    ЭлементОтбора = Список.Отбор.Элементы.Добавить();
+    ЭлементОтбора.ЛевоеЗначение = 1;
+КонецПроцедуры";
+
+    let r = validate_expression_at_level(&index, src, 1);
+    println!("--- level=1 без конструктора ---\n{r:#?}");
+    assert!(
+        !r.errors
+            .iter()
+            .any(|e| e.kind == ExprErrorKind::UnknownTypeMember),
+        "не должно быть UnknownTypeMember: {:#?}",
+        r.errors
+    );
 }
 
 #[test]
