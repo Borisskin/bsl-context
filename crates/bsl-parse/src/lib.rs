@@ -62,6 +62,11 @@ pub struct AssignFact {
     pub byte: usize,
     /// `true` — объявление `Перем Имя`, `false` — присваивание `Имя = ...`.
     pub declaration: bool,
+    /// Имя типа, если справа стоит конструктор: `Запрос = Новый Запрос;` → `Запрос`.
+    /// Даёт тип переменной без всякого вывода типов — и позволяет проверить её
+    /// члены (`Запрос.Текстъ` — опечатка) там, где имя переменной совпало с
+    /// именем платформенного типа (issue #11).
+    pub new_type: Option<String>,
 }
 
 /// Процедура/функция модуля: границы и то, что нужно знать о её именах.
@@ -702,10 +707,12 @@ pub fn collect_facts(source: &str) -> AstFacts {
                 if let Some(left) = node.child_by_field_name("left") {
                     if left.kind() == "identifier" {
                         if let Ok(name) = left.utf8_text(src) {
+                            let new_type = constructor_type(node, src);
                             facts.assigns.push(AssignFact {
                                 name: name.to_string(),
                                 byte: left.start_byte(),
                                 declaration: false,
+                                new_type,
                             });
                         }
                     }
@@ -721,6 +728,7 @@ pub fn collect_facts(source: &str) -> AstFacts {
                             name: name.to_string(),
                             byte: var_name.start_byte(),
                             declaration: true,
+                            new_type: None,
                         });
                     }
                 }
@@ -736,6 +744,7 @@ pub fn collect_facts(source: &str) -> AstFacts {
                                 name: name.to_string(),
                                 byte: name_node.start_byte(),
                                 declaration: true,
+                                new_type: None,
                             });
                         }
                     }
@@ -833,6 +842,68 @@ fn param_names(node: tree_sitter::Node, src: &[u8]) -> HashSet<String> {
         }
     }
     names
+}
+
+/// Тип из конструктора в правой части присваивания: `Запрос = Новый Запрос;`.
+///
+/// Тип берётся только тогда, когда конструктор составляет ВСЮ правую часть:
+/// `Х = Новый Массив` — да; `Х = ?(У, Новый Массив, Неопределено)` и
+/// `Х = Новый Массив().Количество()` — нет (там тип переменной другой).
+/// Так тип известен точно, без вывода типов и без догадок, — и проверка членов
+/// работает даже там, где имя переменной совпало с именем платформенного типа
+/// (`Запрос = Новый HTTPЗапрос`, issue #11).
+fn constructor_type(statement: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let right = statement.child_by_field_name("right")?;
+    let mut node = right;
+    // Правая часть обёрнута в узлы выражения — спускаемся, пока начало совпадает.
+    loop {
+        if node.kind() == "new_expression" {
+            let tail = src.get(node.end_byte()..right.end_byte())?;
+            if !tail.iter().all(|b| b.is_ascii_whitespace()) {
+                return None;
+            }
+            // Хвост после правой части — `;` (возможно, с комментарием за ним) или
+            // конец строки. Иначе за выражением остался код, который дерево НЕ
+            // включило в правую часть: цепочку `Новый Массив().Количество()`
+            // грамматика оставляет отдельным узлом, и типом переменной был бы
+            // `Массив` вместо результата вызова.
+            if !statement_tail_is_end(src, right.end_byte()) {
+                return None;
+            }
+            let mut cursor = node.walk();
+            let ident = node
+                .named_children(&mut cursor)
+                .find(|c| c.kind() == "identifier")?;
+            return ident.utf8_text(src).ok().map(|s| s.to_string());
+        }
+        let child = node.named_child(0)?;
+        if child.start_byte() != node.start_byte() {
+            return None;
+        }
+        node = child;
+    }
+}
+
+/// После позиции `from` идёт конец оператора — `;`, возможно с комментарием,
+/// либо конец строки или текста?
+fn statement_tail_is_end(src: &[u8], from: usize) -> bool {
+    let mut i = from;
+    let skip_spaces = |i: &mut usize| {
+        while matches!(src.get(*i), Some(b' ') | Some(b'\t')) {
+            *i += 1;
+        }
+    };
+    let at_line_end = |i: usize| matches!(src.get(i), None | Some(b'\n') | Some(b'\r'));
+    skip_spaces(&mut i);
+    if at_line_end(i) {
+        return true;
+    }
+    if src.get(i) != Some(&b';') {
+        return false;
+    }
+    i += 1;
+    skip_spaces(&mut i);
+    at_line_end(i) || (src.get(i) == Some(&b'/') && src.get(i + 1) == Some(&b'/'))
 }
 
 /// Директива компилирует процедуру БЕЗ контекста формы?
@@ -1828,6 +1899,52 @@ mod tests {
         );
         assert_eq!(facts.assigns[0].name, "Параметры");
         assert!(!facts.assigns[0].declaration);
+    }
+
+    #[test]
+    fn constructor_type_is_extracted() {
+        // `Новый X` во всей правой части — тип переменной известен точно,
+        // даже если имя переменной совпало с именем платформенного типа.
+        // Хвост `;` с комментарием типу не мешает.
+        let facts = collect_facts(
+            "Процедура Т()\nЗапрос = Новый HTTPЗапрос(\"/\");\nМассив = Новый Массив ; // создаём\nСтр = Новый Структура(\"а)b\");\nКонецПроцедуры\n",
+        );
+        let by_name = |n: &str| {
+            facts
+                .assigns
+                .iter()
+                .find(|a| a.name == n)
+                .and_then(|a| a.new_type.clone())
+        };
+        assert_eq!(by_name("Запрос").as_deref(), Some("HTTPЗапрос"));
+        assert_eq!(by_name("Массив").as_deref(), Some("Массив"));
+        assert_eq!(by_name("Стр").as_deref(), Some("Структура"));
+    }
+
+    #[test]
+    fn constructor_not_the_whole_right_side_gives_no_type() {
+        // Конструктор внутри выражения, под вызовом или в сумме типом переменной
+        // не является: `Х = Новый Массив().Количество()` — это Число, а не Массив.
+        let facts = collect_facts(
+            "Процедура Т()\nА = ?(У, Новый Массив, Неопределено);\nБ = Новый Массив().Количество();\nВ = Новый Массив + Чтото;\nКонецПроцедуры\n",
+        );
+        let types: Vec<(&str, &Option<String>)> = facts
+            .assigns
+            .iter()
+            .map(|a| (a.name.as_str(), &a.new_type))
+            .collect();
+        assert!(
+            facts.assigns.iter().all(|a| a.new_type.is_none()),
+            "тип не должен выводиться: {types:?}"
+        );
+    }
+
+    #[test]
+    fn var_declaration_has_no_constructor_type() {
+        let facts = collect_facts("Перем Кэш Экспорт;\n");
+        assert_eq!(facts.assigns.len(), 1, "assigns: {:?}", facts.assigns.len());
+        assert!(facts.assigns[0].declaration);
+        assert!(facts.assigns[0].new_type.is_none());
     }
 
     #[test]

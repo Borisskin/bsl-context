@@ -29,6 +29,7 @@ use platform_index::PlatformIndex;
 use bsl_parse::{collect_facts, CallFact, DotFact, NewFact};
 
 use crate::check::{validate_method_call, SimilarValue};
+use crate::locals::LocalNames;
 use crate::scope::{extract_scope_map, extract_type_annotations, ScopeMap};
 use crate::symbols::SymbolSource;
 
@@ -344,7 +345,10 @@ pub fn validate_expression(index: &PlatformIndex, source: &str) -> ExpressionVal
 /// Проверка с явным уровнем валидации.
 ///
 /// - `level=1` — статический анализ ссылок с явным именем типа в исходнике
-///   (TypeDotMember, NewExpression, GlobalCall). Дефолт.
+///   (TypeDotMember, NewExpression, GlobalCall), включая тип переменной из
+///   конструктора (`Х = Новый ТипX` → члены `Х` проверяются по `ТипX`). Дефолт.
+///   Имя переменной, совпавшее с именем платформенного типа, типом НЕ считается:
+///   нет конструктора — проверка членов молчит (issue #11).
 /// - `level=2` — дополнительно локальный type inference в пределах процедуры
 ///   (Phase 8 MVP): переменные, выведенные из `Х = Новый ТипX`, `Х = ТипY.ЗначениеZ`
 ///   и аннотации `// @type ТипX`. У ложно-срабатываний больше — поэтому отдельный флаг.
@@ -368,7 +372,17 @@ pub fn validate_expression_at_level(
     };
 
     let mut errors = Vec::new();
-    check_type_dot_members(index, source, &facts.dots, scope_map.as_ref(), &mut errors);
+    let locals = LocalNames::new(&facts);
+    // Фрагмент: путь модуля неизвестен, считаем, что это не модуль формы.
+    check_type_dot_members(
+        index,
+        source,
+        &facts.dots,
+        scope_map.as_ref(),
+        Some(&locals),
+        false,
+        &mut errors,
+    );
     check_new_expressions(index, source, &facts.news, &mut errors);
     check_global_calls(
         index,
@@ -424,24 +438,52 @@ pub use bsl_parse::{mask_strings_and_comments, strip_extension_directives};
 
 // ── Проверки ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_type_dot_members(
     index: &PlatformIndex,
     src: &str,
     dots: &[DotFact],
     scope_map: Option<&ScopeMap>,
+    locals: Option<&LocalNames>,
+    form_module: bool,
     errors: &mut Vec<ExprError>,
 ) {
     for dot in dots {
         let head = dot.head.as_str();
         let member = dot.member.as_str();
 
+        // Локальное имя ПЕРЕКРЫВАЕТ одноимённый платформенный тип: `ЭлементОтбора`,
+        // `Отбор`, `Поле`, `Блокировка`, `Запрос` — и типы платформы, и ходовые
+        // имена переменных. Раньше голова обращения сверялась с типом раньше, чем
+        // с переменными, и члены переменной проверялись по чужому типу («у типа
+        // ЭлементОтбора нет члена ЛевоеЗначение», issue #11). Тип такой переменной
+        // даёт конструктор (`Запрос = Новый Запрос`) или вывод типов (уровень ≥ 2);
+        // типа нет — молчим, это лучше ложной находки с подсказкой чужого члена.
+        //
+        // Тем же конфликтом бывает свойство контекста модуля: `УсловноеОформление`
+        // — свойство формы типа `УсловноеОформлениеКомпоновкиДанных`, а не
+        // одноимённый платформенный тип.
+        let head_is_local = locals.is_some_and(|l| l.is_local(dot.head_byte, head))
+            || crate::context_names::is_context_property_of_other_type(index, form_module, head);
+
         // Уровень 1: head — это имя платформенного типа.
         // Уровень 2: head может быть локальной переменной с известным типом.
-        let resolved_type_name: Option<String> = match index.find_type(head) {
-            Some(_) => Some(head.to_string()),
-            None => scope_map
-                .and_then(|sm| sm.type_of_var(dot.head_byte, head))
-                .cloned(),
+        let resolved_type_name: Option<String> = if head_is_local {
+            locals
+                .and_then(|l| l.constructed_type(dot.head_byte, head))
+                .map(|t| t.to_string())
+                .or_else(|| {
+                    scope_map
+                        .and_then(|sm| sm.type_of_var(dot.head_byte, head))
+                        .cloned()
+                })
+        } else {
+            match index.find_type(head) {
+                Some(_) => Some(head.to_string()),
+                None => scope_map
+                    .and_then(|sm| sm.type_of_var(dot.head_byte, head))
+                    .cloned(),
+            }
         };
         let Some(type_name) = resolved_type_name else {
             continue; // head — обычная переменная без выведенного типа

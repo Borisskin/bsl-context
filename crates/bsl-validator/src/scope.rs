@@ -358,7 +358,7 @@ fn parse_chain(rhs: &str) -> Option<Vec<ChainSeg>> {
 /// кавычки, пробелы). Берём первый известный тип, пропуская служебные
 /// `Неопределено`/`Произвольный`. `None` — если ни один компонент не является
 /// известным типом (резолв цепочки дальше не идёт, ошибка не порождается).
-fn primary_type(index: &PlatformIndex, raw: &str) -> Option<String> {
+pub(crate) fn primary_type(index: &PlatformIndex, raw: &str) -> Option<String> {
     for part in raw.split([',', ';', '|']) {
         let p = part.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_'));
         if p.is_empty()
