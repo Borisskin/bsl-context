@@ -8,6 +8,7 @@ pub mod config_objects;
 pub mod context_names;
 pub mod declarations;
 pub mod directives;
+pub mod enum_values;
 pub mod expression;
 pub mod homoglyphs;
 pub(crate) mod locals;

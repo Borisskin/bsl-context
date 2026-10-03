@@ -91,17 +91,17 @@ pub fn validate_enum(index: &PlatformIndex, type_name: &str, value_name: &str) -
     }
 
     let value_lower = value_name.to_lowercase();
-    // Имена сверяются после сведения латинско-кириллических двойников: в справке
-    // 8.3.17 значение `РежимОткрытияОкнаФормы.БлокироватьВесьИнтерфейс` записано
-    // с ЛАТИНСКОЙ `c`, а платформа принимает кириллическую. Без сведения
-    // корректный код получал находку `high`, а подсказка предлагала имя, которое
-    // платформа отвергает (issue #18).
-    let valid = ty.enum_values.iter().any(|v| {
-        crate::homoglyphs::same_after_fold(&v.name_ru, value_name)
-            || crate::homoglyphs::same_after_fold(&v.name_en, value_name)
-    });
+    // Значение принимается, если оно есть в справке (со сведением
+    // латинско-кириллических двойников — issue #18), попадает в диапазон из
+    // справки (`A...Z`, `F1...F12` у перечисления `Клавиша` — issue #22) либо
+    // входит в точечный словарь значений, которые платформа принимает ради
+    // совместимости.
+    let valid = crate::enum_values::has_value(&ty.enum_values, value_name)
+        || crate::enum_values::is_deprecated_value(&ty.name_ru, value_name);
 
-    let all_valid_values: Vec<String> = ty.enum_values.iter().map(|v| v.name_ru.clone()).collect();
+    // Диапазоны показываем развёрнутыми: `A...Z` в списке допустимых значений
+    // бесполезен, нужны сами имена.
+    let all_valid_values: Vec<String> = crate::enum_values::value_names(&ty.enum_values);
     let open_collection = ty.is_open_enum();
 
     if valid {
@@ -415,6 +415,58 @@ mod tests {
         assert!(r.valid, "открытую коллекцию по справке не отвергаем");
         assert!(r.open_collection);
         assert!(validate_enum(&idx, "КартинкиТест", "Лупа").valid);
+    }
+
+    /// Issue #22: значения-диапазоны из справки (`A...Z`, `F1...F12`) платформа
+    /// принимает конкретными именами, а устаревшие значения — ради совместимости.
+    #[test]
+    fn enum_range_values_and_deprecated_names_are_accepted() {
+        use platform_index::{PlatformIndex, Type};
+        let mut idx = PlatformIndex::new();
+        idx.insert_type(Type {
+            name_ru: "Клавиша".into(),
+            name_en: String::new(),
+            description: String::new(),
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: vec![
+                enum_v("_0..._9"),
+                enum_v("A...Z"),
+                enum_v("BackSpace"),
+                enum_v("F1...F12"),
+                enum_v("Num0...Num9"),
+            ],
+        });
+        idx.insert_type(Type {
+            name_ru: "ОтображениеОбычнойГруппы".into(),
+            name_en: String::new(),
+            description: String::new(),
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: vec![enum_v("Нет"), enum_v("СлабоеВыделение")],
+        });
+
+        for value in ["A", "F5", "F12", "Num0", "Num9", "_1", "BackSpace"] {
+            assert!(
+                validate_enum(&idx, "Клавиша", value).valid,
+                "Клавиша.{value} платформа принимает"
+            );
+        }
+        for value in ["F13", "Num10", "_10", "A1"] {
+            assert!(
+                !validate_enum(&idx, "Клавиша", value).valid,
+                "Клавиша.{value} платформа не принимает"
+            );
+        }
+        // Устаревшие имена — точечный словарь, а не общее правило.
+        assert!(validate_enum(&idx, "ОтображениеОбычнойГруппы", "Линия").valid);
+        assert!(!validate_enum(&idx, "ОтображениеОбычнойГруппы", "Рамка").valid);
+        // Диапазоны показываются развёрнутыми.
+        let r = validate_enum(&idx, "Клавиша", "A");
+        assert!(r.all_valid_values.contains(&"F5".to_string()));
+        assert!(!r.all_valid_values.iter().any(|v| v.contains("...")));
     }
 
     #[test]
