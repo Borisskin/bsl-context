@@ -108,6 +108,38 @@ fn validate_module_at_level_inner(
     owner_exports: Option<&HashSet<String>>,
     symbols_degraded: bool,
 ) -> ExpressionValidation {
+    validate_module_at_level_inner_ext(
+        index,
+        source,
+        level,
+        module_path,
+        form_attributes,
+        symbols,
+        owner_exports,
+        symbols_degraded,
+        None,
+    )
+}
+
+/// `form_kind` — вид формы, снятый С ФАЙЛОВ ВЫГРУЗКИ (`Ext/Form.xml` —
+/// управляемая, `Ext/Form.bin` — обычная), когда корень выгрузки известен.
+///
+/// Нужен фрагментам управляемых форм: директив компиляции в тексте фрагмента нет,
+/// и без подсказки он считался бы обычной формой, а её контекст — объект-владелец
+/// (issue #32: `ПолучитьФорму` с шестью аргументами «не принимает 6 аргументов»).
+/// `None` — вид формы неизвестен, работают прежние признаки (директивы).
+#[allow(clippy::too_many_arguments)]
+fn validate_module_at_level_inner_ext(
+    index: &PlatformIndex,
+    source: &str,
+    level: u8,
+    module_path: Option<&str>,
+    form_attributes: Option<&HashSet<String>>,
+    symbols: Option<&dyn SymbolSource>,
+    owner_exports: Option<&HashSet<String>>,
+    symbols_degraded: bool,
+    form_kind: Option<crate::module_context::FormKind>,
+) -> ExpressionValidation {
     // Модуль расширения: блоки `#Удаление … #КонецУдаления` в скомпилированный
     // модуль не попадают, но могут обрывать строковый литерал на середине —
     // тогда файл не является корректным BSL, маскировка «съезжает» и текст
@@ -172,8 +204,9 @@ fn validate_module_at_level_inner(
     // а не глобальной функцией. Тип выводится из пути выгрузки; для формы ещё и
     // по признаку «есть директивы компиляции» (управляемая форма объектных методов
     // не видит). Не опознали — `None`, и проверка молчит, как и раньше.
-    let module_context = module_path
-        .and_then(|path| crate::module_context::context_type(index, path, facts.has_directives));
+    let module_context = module_path.and_then(|path| {
+        crate::module_context::context_type(index, path, facts.has_directives, form_kind)
+    });
     check_global_calls(
         index,
         source,
@@ -302,6 +335,49 @@ pub fn validate_module_with_symbols(
         symbols,
         owner_exports.as_ref(),
         false,
+    );
+
+    if profile == Profile::Strict {
+        result.errors.retain(|e| e.confidence == Confidence::High);
+        result.valid = result.errors.is_empty();
+    }
+
+    result
+}
+
+/// Проверка модуля с внешним источником имён И подсказкой о виде формы, снятой
+/// С ФАЙЛОВ ВЫГРУЗКИ (`Ext/Form.xml` — управляемая, `Ext/Form.bin` — обычная).
+///
+/// Как [`validate_module_with_symbols`], но дополнительно передаёт в проверку
+/// контекста вид формы: у ФРАГМЕНТА управляемой формы директив компиляции в тексте
+/// нет, и без подсказки он считался бы обычной формой, а её контекст — объектом-
+/// владельцем (issue #32: `ПолучитьФорму` с шестью аргументами «не принимает 6
+/// аргументов»). Подсказку считает тот, у кого есть корень выгрузки (сервер).
+#[allow(clippy::too_many_arguments)]
+pub fn validate_module_with_symbols_and_form_kind(
+    index: &PlatformIndex,
+    source: &str,
+    level: u8,
+    profile: Profile,
+    module_path: Option<&str>,
+    form_attributes: Option<&HashSet<String>>,
+    symbols: Option<&dyn SymbolSource>,
+    form_kind: Option<crate::module_context::FormKind>,
+) -> ExpressionValidation {
+    let effective_level = if profile == Profile::Strict { 1 } else { level };
+    let owner_exports = module_path
+        .zip(symbols)
+        .and_then(|(path, src)| src.owner_exports(path));
+    let mut result = validate_module_at_level_inner_ext(
+        index,
+        source,
+        effective_level,
+        module_path,
+        form_attributes,
+        symbols,
+        owner_exports.as_ref(),
+        false,
+        form_kind,
     );
 
     if profile == Profile::Strict {
@@ -723,5 +799,78 @@ EndFunction
             Profile::Full,
         );
         assert!(result.errors.is_empty(), "{:?}", result.errors);
+    }
+
+    /// Issue #32: если имя есть и у контекста модуля, и в глобальном контексте, а
+    /// платформа переадресует вызов (справка `СправочникМенеджер.ПолучитьДанныеВыбора`:
+    /// «если в модуле менеджера указано два параметра, будет вызван метод
+    /// ПолучитьДанныеВыбора глобального контекста»), допустимо то число аргументов,
+    /// которое принимает ЛЮБАЯ из двух сигнатур.
+    #[test]
+    fn manager_context_and_global_signatures_are_united() {
+        use platform_index::{Method, Parameter, Signature, Type};
+
+        fn method_with_args(name: &str, params: usize) -> Method {
+            Method {
+                name_ru: name.into(),
+                name_en: String::new(),
+                description: String::new(),
+                return_type: String::new(),
+                signatures: vec![Signature {
+                    name: String::new(),
+                    description: String::new(),
+                    parameters: (0..params)
+                        .map(|i| Parameter {
+                            name: format!("П{}", i + 1),
+                            type_name: String::new(),
+                            required: false,
+                            description: String::new(),
+                        })
+                        .collect(),
+                }],
+            }
+        }
+
+        let mut index = PlatformIndex::new();
+        // Шаблонный тип менеджера — метод с ОДНИМ параметром, как в справке.
+        index.insert_type(Type {
+            name_ru: "СправочникМенеджер.<Имя справочника>".into(),
+            name_en: String::new(),
+            description: String::new(),
+            methods: vec![method_with_args("ПолучитьДанныеВыбора", 1)],
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: Vec::new(),
+        });
+        // Глобальная функция того же имени — с ДВУМЯ параметрами.
+        index
+            .global_methods
+            .push(method_with_args("ПолучитьДанныеВыбора", 2));
+
+        let manager = Some("Catalogs/ЕдиницыИзмерения/Ext/ManagerModule.bsl");
+
+        // Два аргумента: принимает глобальная сигнатура — находки быть не должно.
+        let src = "Процедура Т(Параметры)\n\tД = ПолучитьДанныеВыбора(Параметры, Неопределено);\nКонецПроцедуры\n";
+        let result = validate_module_with_profile(&index, src, manager, None, 3, Profile::Full);
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::WrongArgumentCount),
+            "объединение сигнатур: два аргумента допустимы: {:?}",
+            result.errors
+        );
+
+        // Контроль: три аргумента не принимает ни одна из двух сигнатур.
+        let src3 = "Процедура Т(Параметры)\n\tД = ПолучитьДанныеВыбора(Параметры, Неопределено, Ложь);\nКонецПроцедуры\n";
+        let result3 = validate_module_with_profile(&index, src3, manager, None, 3, Profile::Full);
+        assert!(
+            result3
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::WrongArgumentCount),
+            "три аргумента не принимает ни одна сигнатура — находка обязана быть: {:?}",
+            result3.errors
+        );
     }
 }

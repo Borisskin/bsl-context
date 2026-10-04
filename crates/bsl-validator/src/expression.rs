@@ -532,6 +532,12 @@ pub(crate) fn check_type_dot_members(
         {
             continue;
         }
+        // Имена СВОЙСТВ, которые задаются данными, а не справкой (`XBase` —
+        // колонки DBF-файла, issue #31). Вызов метода при этом проверяется:
+        // опечатка в имени метода должна находиться, как и раньше.
+        if !dot.member_is_call && types.iter().any(|ty| is_dynamic_property_type(&ty.name_ru)) {
+            continue;
+        }
         // Член есть хотя бы у одной альтернативы — находки нет. Имена сверяются
         // со сведением латинско-кириллических двойников: в справке платформы
         // встречаются неотличимые на экране опечатки (issue #18).
@@ -665,6 +671,21 @@ fn is_dynamic_member_type(name_ru: &str) -> bool {
     // ложных находок на 3000 модулях, при том что модульные тесты молчали.
     let folded = crate::homoglyphs::fold_lookalikes(&name_ru.to_lowercase());
     DYNAMIC_MEMBER_TYPES
+        .iter()
+        .any(|entry| crate::homoglyphs::fold_lookalikes(entry) == folded)
+}
+
+/// Типы, у которых имена СВОЙСТВ задаются данными в рантайме, а методы — справкой.
+///
+/// `XBase` (issue #31): поля — это колонки конкретного DBF-файла (`База.DAYDATE`,
+/// `База.NAME`), статически их не узнать, поэтому обращение к свойству не
+/// проверяется. Но вызов метода проверяется как обычно: `База.ОткрытьФайлл`
+/// (опечатка) обязан остаться находкой — иначе правка «чинит» и настоящее.
+const DYNAMIC_PROPERTY_TYPES: &[&str] = &["xbase"];
+
+fn is_dynamic_property_type(name_ru: &str) -> bool {
+    let folded = crate::homoglyphs::fold_lookalikes(&name_ru.to_lowercase());
+    DYNAMIC_PROPERTY_TYPES
         .iter()
         .any(|entry| crate::homoglyphs::fold_lookalikes(entry) == folded)
 }
@@ -875,6 +896,16 @@ pub(crate) fn check_global_calls(
                 crate::check::validate_type_method_call(context, &call.name, call.arg_count)
             {
                 if !result.valid {
+                    // Платформа переадресует вызов, когда имя есть и у контекста
+                    // модуля, и в глобальном контексте: справка
+                    // `СправочникМенеджер.ПолучитьДанныеВыбора` прямо говорит, что
+                    // при двух параметрах в модуле менеджера вызовется метод
+                    // глобального контекста (issue #32). Значит допустимо то число
+                    // аргументов, которое принимает ЛЮБАЯ из двух сигнатур, и
+                    // находки нет.
+                    if validate_method_call(index, &call.name, call.arg_count).valid {
+                        continue;
+                    }
                     let (line, col) = pos_at(src, call.byte);
                     errors.push(ExprError::new(
                         line,
@@ -1289,6 +1320,24 @@ mod tests {
             ],
         });
 
+        // Issue #31: `XBase` — свойства это поля конкретного DBF-файла (динамические),
+        // а методы берутся из справки и проверяются.
+        index.insert_type(Type {
+            name_ru: "XBase".into(),
+            name_en: "XBase".into(),
+            description: String::new(),
+            methods: vec![Method {
+                name_ru: "ОткрытьФайл".into(),
+                name_en: "OpenFile".into(),
+                description: String::new(),
+                return_type: String::new(),
+                signatures: Vec::new(),
+            }],
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: Vec::new(),
+        });
+
         index
     }
 
@@ -1344,6 +1393,36 @@ mod tests {
         );
         assert_eq!(result.errors[0].kind, ExprErrorKind::UnknownEnumValue);
         assert_eq!(result.errors[0].confidence, Confidence::High);
+    }
+
+    /// Issue #31: свойства `XBase` — поля конкретного DBF-файла, статически их не
+    /// узнать, поэтому обращение к свойству не проверяется. Вызов метода — да:
+    /// иначе правка «чинит» и настоящую опечатку в имени метода.
+    #[test]
+    fn xbase_properties_are_dynamic_but_methods_are_checked() {
+        let index = test_index();
+
+        // Свойства (поля DBF) — молчание.
+        let src = "База = Новый XBase;\nД = База.DAYDATE;\nБаза.NAME = \"x\";\n";
+        let result = validate_expression_with_profile(&index, src, 3, Profile::Full);
+        assert!(
+            result.valid,
+            "поля DBF не проверяются, находок быть не должно: {:?}",
+            result.errors
+        );
+
+        // Контроль: опечатка в имени МЕТОДА остаётся находкой.
+        let src2 = "База = Новый XBase;\nБаза.ОткрытьФайлл(\"f\");\n";
+        let result2 = validate_expression_with_profile(&index, src2, 3, Profile::Full);
+        assert!(!result2.valid, "опечатка в методе должна находиться");
+        assert!(
+            result2
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::UnknownTypeMember),
+            "ожидалась находка unknown_type_member: {:?}",
+            result2.errors
+        );
     }
 
     /// Issue #15, класс 2: члены `COMОбъект`/`ВнешнийОбъект` не проверяются.

@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bsl_validator::{
-    validate_enum, validate_method_call, validate_module_degraded, validate_module_with_profile,
-    validate_module_with_symbols, ExpressionValidation, Profile, SymbolSource, FORM_TYPE,
+    module_context::FormKind, validate_enum, validate_method_call, validate_module_degraded,
+    validate_module_with_profile, validate_module_with_symbols_and_form_kind, ExpressionValidation,
+    Profile, SymbolSource, FORM_TYPE,
 };
 use platform_index::{format, Definition, PlatformIndex, SearchEngine};
 use rmcp::{
@@ -26,6 +27,28 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::module_source::{self, ModuleFile};
+
+/// Вид формы по файлам выгрузки: рядом с модулем формы лежит `Ext/Form.xml`
+/// (форма управляемая) или `Ext/Form.bin` (обычная).
+///
+/// Нужен фрагментам управляемых форм (issue #32): директив компиляции в тексте
+/// фрагмента нет, и без этой подсказки он считался бы обычной формой, а её
+/// контекст — объектом-владельцем. `None` — не определили (корня нет, файлов нет,
+/// путь не модуль формы); тогда работают прежние признаки, директивы.
+fn form_kind_from_dump(root: Option<&Path>, module_path: Option<&str>) -> Option<FormKind> {
+    let root = root?;
+    let path = module_path?.replace('\\', "/");
+    // `Catalogs/X/Forms/Ф/Ext/Form/Module.bsl` → `<root>/Catalogs/X/Forms/Ф/Ext/`
+    let dir = path.strip_suffix("Form/Module.bsl")?;
+    let base = root.join(dir);
+    if base.join("Form.xml").is_file() {
+        Some(FormKind::Managed)
+    } else if base.join("Form.bin").is_file() {
+        Some(FormKind::Ordinary)
+    } else {
+        None
+    }
+}
 
 /// Слот одного источника имён: конфиг, сам источник (пересборка подменяет его на
 /// ходу) и флаг «идёт пересборка». Флаг на слот, а не на сервер: пересборка индекса
@@ -1257,7 +1280,12 @@ impl BslContextServer {
                 ),
             );
         }
-        let result = validate_module_with_symbols(
+        // Вид формы по файлам выгрузки (issue #32): у фрагмента управляемой формы
+        // директив компиляции в тексте нет, и без подсказки он считался бы обычной
+        // формой, а её контекст — объектом-владельцем. Директивы остаются запасным
+        // признаком, когда корня выгрузки нет.
+        let form_kind = form_kind_from_dump(slot.config.root.as_deref(), module_path.as_deref());
+        let result = validate_module_with_symbols_and_form_kind(
             &self.index,
             source_text,
             level,
@@ -1265,6 +1293,7 @@ impl BslContextServer {
             module_path.as_deref(),
             form_attributes.as_ref(),
             Some(source.as_ref()),
+            form_kind,
         );
         if !source.is_healthy() {
             // Отвалился во время самой валидации (code-index упал на полпути) — часть
