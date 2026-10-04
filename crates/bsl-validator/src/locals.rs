@@ -26,15 +26,90 @@
 //! конструктора (`Запрос = Новый Запрос`) либо из вывода типов (`ScopeMap`,
 //! уровень ≥ 2), а если типа нет — проверка молчит.
 
-use bsl_parse::AstFacts;
+use std::collections::{HashMap, HashSet};
 
+use bsl_parse::{AssignFact, AstFacts, ProcScope};
+
+/// Имена модуля с индексом по имени.
+///
+/// Индекс строится ОДИН раз на модуль. До него каждый вопрос «это локальное имя?»
+/// перебирал ВСЕ присваивания модуля и все переменные циклов, да ещё с
+/// `to_lowercase()` на каждом сравнении, а `visible()` внутри дополнительно
+/// сканировал список процедур. Замер фаз показал, что проверки занимают 93%
+/// времени прогона, и главный вклад был именно здесь: на модуле в 40 тысяч строк
+/// это миллионы операций и аллокаций на одну проверку члена.
 pub(crate) struct LocalNames<'a> {
     facts: &'a AstFacts,
+    /// Присваивания по имени в нижнем регистре; ближайшее выбирается по байту.
+    assigns_by_name: HashMap<String, Vec<&'a AssignFact>>,
+    /// Переменные циклов по имени: имена в фактах уже в нижнем регистре.
+    loop_vars_by_name: HashMap<String, Vec<usize>>,
+    /// Имена, объявленные `Перем` на уровне модуля: видны из любой процедуры.
+    module_vars: HashSet<String>,
+    /// Процедуры, отсортированные по началу, — двоичный поиск по точке вместо
+    /// линейного перебора списка процедур на каждый вопрос.
+    procs_sorted: Vec<&'a ProcScope>,
 }
 
 impl<'a> LocalNames<'a> {
     pub(crate) fn new(facts: &'a AstFacts) -> Self {
-        Self { facts }
+        let mut procs_sorted: Vec<&ProcScope> = facts.procs.iter().collect();
+        procs_sorted.sort_unstable_by_key(|p| p.byte_start);
+        let in_proc = |byte: usize| {
+            procs_sorted
+                .binary_search_by(|p| {
+                    if byte < p.byte_start {
+                        std::cmp::Ordering::Greater
+                    } else if byte >= p.byte_end {
+                        std::cmp::Ordering::Less
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
+                .is_ok()
+        };
+
+        let mut assigns_by_name: HashMap<String, Vec<&AssignFact>> = HashMap::new();
+        let mut module_vars: HashSet<String> = HashSet::new();
+        for assign in &facts.assigns {
+            let key = assign.name.to_lowercase();
+            if assign.declaration && !in_proc(assign.byte) {
+                module_vars.insert(key.clone());
+            }
+            assigns_by_name.entry(key).or_default().push(assign);
+        }
+
+        let mut loop_vars_by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for site in &facts.loop_var_sites {
+            loop_vars_by_name
+                .entry(site.name.clone())
+                .or_default()
+                .push(site.byte);
+        }
+
+        Self {
+            facts,
+            assigns_by_name,
+            loop_vars_by_name,
+            module_vars,
+            procs_sorted,
+        }
+    }
+
+    /// Номер процедуры, содержащей точку; `None` — код в теле модуля.
+    fn proc_index(&self, byte: usize) -> Option<usize> {
+        let idx = self.procs_sorted.partition_point(|p| p.byte_start <= byte);
+        if idx == 0 {
+            return None;
+        }
+        (byte < self.procs_sorted[idx - 1].byte_end).then_some(idx - 1)
+    }
+
+    /// Точка `site` — в той же области видимости, что и `query`: та же процедура
+    /// либо (для обеих) тело модуля. Заменяет прежние замыкания `in_scope` и
+    /// `visible`, которые на каждый вопрос перебирали список процедур.
+    fn same_scope(&self, query: usize, site: usize) -> bool {
+        self.proc_index(query) == self.proc_index(site)
     }
 
     /// Тип локальной переменной, если он задан конструктором: `Запрос = Новый Запрос;`.
@@ -57,16 +132,10 @@ impl<'a> LocalNames<'a> {
     /// процедуры к этой точке отношения не имеет.
     pub(crate) fn constructed_type(&self, byte: usize, name: &str) -> Option<Vec<String>> {
         let name_lower = name.to_lowercase();
-        let scope = self.facts.procs.iter().find(|p| p.contains(byte));
-        let in_scope = |site: usize| match scope {
-            Some(s) => s.contains(site),
-            None => !self.facts.procs.iter().any(|p| p.contains(site)),
-        };
-        let nearest = self
-            .facts
-            .assigns
+        let candidates = self.assigns_by_name.get(&name_lower)?;
+        let nearest = candidates
             .iter()
-            .filter(|a| a.name.to_lowercase() == name_lower && a.byte <= byte && in_scope(a.byte))
+            .filter(|a| a.byte <= byte && self.same_scope(byte, a.byte))
             .max_by_key(|a| a.byte)?;
         let mut types: Vec<String> = vec![nearest.new_type.as_deref()?.to_string()];
 
@@ -83,9 +152,10 @@ impl<'a> LocalNames<'a> {
             })
             .min_by_key(|b| b.span.1.saturating_sub(b.span.0));
         if let Some(block) = block {
-            for a in self.facts.assigns.iter().filter(|a| {
-                a.name.to_lowercase() == name_lower && a.byte <= byte && in_scope(a.byte)
-            }) {
+            for a in candidates
+                .iter()
+                .filter(|a| a.byte <= byte && self.same_scope(byte, a.byte))
+            {
                 if !block
                     .branches
                     .iter()
@@ -112,21 +182,9 @@ impl<'a> LocalNames<'a> {
     /// этого не обязателен, а местная переменная тела модуля процедурам не видна.
     pub(crate) fn is_local(&self, byte: usize, name: &str) -> bool {
         let name_lower = name.to_lowercase();
-        let scope = self.facts.procs.iter().find(|p| p.contains(byte));
-        // Видно ли имя из этой точки: связывание в той же процедуре, либо в теле
-        // модуля, если и спрашиваем из тела модуля.
-        let visible = |site_byte: usize| match scope {
-            Some(s) => s.contains(site_byte),
-            None => !self.facts.procs.iter().any(|p| p.contains(site_byte)),
-        };
 
         // Переменная уровня модуля видна везде.
-        let module_var = self.facts.assigns.iter().any(|a| {
-            a.declaration
-                && a.name.to_lowercase() == name_lower
-                && !self.facts.procs.iter().any(|p| p.contains(a.byte))
-        });
-        if module_var {
+        if self.module_vars.contains(&name_lower) {
             return true;
         }
 
@@ -139,30 +197,30 @@ impl<'a> LocalNames<'a> {
         // нужно (issue #22): `Для Каждого ГруппировкаКолонок Из Список Цикл` —
         // имя совпало с типом-перечислением, и `ГруппировкаКолонок.Значение`
         // получило `unknown_enum_value` с `confidence: high`.
-        if self
-            .facts
-            .loop_var_sites
-            .iter()
-            .any(|site| site.name == name_lower && visible(site.byte))
-        {
-            return true;
+        if let Some(sites) = self.loop_vars_by_name.get(&name_lower) {
+            if sites.iter().any(|site| self.same_scope(byte, *site)) {
+                return true;
+            }
         }
 
-        let Some(scope) = scope else {
-            // Код вне процедур: локальны объявления `Перем` (проверены выше) и
-            // присваивания в самом теле модуля.
-            return self.facts.assigns.iter().any(|a| {
-                a.name.to_lowercase() == name_lower
-                    && !self.facts.procs.iter().any(|p| p.contains(a.byte))
-            });
-        };
-        if scope.params.contains(&name_lower) {
-            return true;
+        // Параметр объемлющей процедуры связывает имя так же, как присваивание,
+        // и присваиваний у него может не быть вовсе — проверяем ДО раннего выхода
+        // по отсутствию одноимённых присваиваний.
+        if let Some(index) = self.proc_index(byte) {
+            if self.procs_sorted[index].params.contains(&name_lower) {
+                return true;
+            }
         }
-        self.facts
-            .assigns
+
+        let Some(candidates) = self.assigns_by_name.get(&name_lower) else {
+            return false;
+        };
+        // Присваивание в той же области видимости: в теле модуля (код вне процедур)
+        // `Перем` для этого не обязателен, а местная переменная тела модуля
+        // процедурам не видна — это и различает `same_scope`.
+        candidates
             .iter()
-            .any(|a| scope.contains(a.byte) && a.name.to_lowercase() == name_lower)
+            .any(|assign| self.same_scope(byte, assign.byte))
     }
 }
 
