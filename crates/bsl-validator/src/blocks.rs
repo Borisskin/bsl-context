@@ -32,6 +32,58 @@
 
 use crate::expression::{pos_at, Confidence, ExprError, ExprErrorKind};
 
+/// Смысл блока языка — без привязки к языку ключевого слова.
+///
+/// Платформа допускает СМЕШАННЫЕ пары: `If … КонецЕсли`, `Пока … Цикл … EndDo`,
+/// `Try … Исключение … КонецПопытки`. Автор issue #30 проверил это на 8.3.17.1549 и
+/// 8.3.27.2214 через `Выполнить()` — компилируются все сочетания. Значит,
+/// сопоставлять открывающее и закрывающее слово нужно ПО СМЫСЛУ, а не по языку:
+/// прежняя сверка строк давала ложные находки на рабочем коде (3 из 4 находок в его
+/// замере были ложными).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Try,
+    If,
+    Loop,
+}
+
+impl BlockKind {
+    /// Закрывающее слово, русский вариант — он идёт в сообщение первым.
+    fn close_ru(self) -> &'static str {
+        match self {
+            BlockKind::Try => "КонецПопытки",
+            BlockKind::If => "КонецЕсли",
+            BlockKind::Loop => "КонецЦикла",
+        }
+    }
+
+    /// Английский вариант закрывающего слова — на случай кода на английском.
+    fn close_en(self) -> &'static str {
+        match self {
+            BlockKind::Try => "EndTry",
+            BlockKind::If => "EndIf",
+            BlockKind::Loop => "EndDo",
+        }
+    }
+}
+
+/// Открывает или закрывает блок это слово? `(смысл, открывающее?)`.
+///
+/// Пары: `Попытка`/`Try` … `КонецПопытки`/`EndTry`, `Если`/`If` … `КонецЕсли`/`EndIf`,
+/// `Цикл`/`Do` … `КонецЦикла`/`EndDo`. Слова `Тогда`/`Then`, `Исключение`/`Except`,
+/// `Для`/`For` блоками не считаются: они не открывают и не закрывают его.
+fn block_word(word: &str) -> Option<(BlockKind, bool)> {
+    Some(match word {
+        "попытка" | "try" => (BlockKind::Try, true),
+        "если" | "if" => (BlockKind::If, true),
+        "цикл" | "do" => (BlockKind::Loop, true),
+        "конецпопытки" | "endtry" => (BlockKind::Try, false),
+        "конецесли" | "endif" => (BlockKind::If, false),
+        "конеццикла" | "enddo" => (BlockKind::Loop, false),
+        _ => return None,
+    })
+}
+
 /// Проверить баланс блоков `Попытка`/`Если`/`Цикл`.
 ///
 /// Директивы препроцессора пропускаются целиком: `#Если` — не блок языка, и
@@ -42,7 +94,7 @@ use crate::expression::{pos_at, Confidence, ExprError, ExprErrorKind};
 /// неизвестен, и продолжать значит сыпать каскадом.
 pub fn check_block_balance(source: &str, cleaned: &str, errors: &mut Vec<ExprError>) {
     let text = blank_directive_lines(cleaned);
-    let mut stack: Vec<(&'static str, usize)> = Vec::new();
+    let mut stack: Vec<(BlockKind, usize)> = Vec::new();
     let mut reported = false;
     let mut i = 0usize;
 
@@ -74,32 +126,33 @@ pub fn check_block_balance(source: &str, cleaned: &str, errors: &mut Vec<ExprErr
                 i = end;
                 continue;
             }
-            match lower.as_str() {
-                "попытка" => stack.push(("КонецПопытки", i)),
-                "если" => stack.push(("КонецЕсли", i)),
-                "цикл" => stack.push(("КонецЦикла", i)),
-                "конецпопытки" | "конецесли" | "конеццикла" => {
-                    let expected = match lower.as_str() {
-                        "конецпопытки" => "КонецПопытки",
-                        "конецесли" => "КонецЕсли",
-                        _ => "КонецЦикла",
-                    };
-                    let ok = stack.last().is_some_and(|(kind, _)| *kind == expected);
+            match block_word(&lower) {
+                Some((kind, true)) => stack.push((kind, i)),
+                Some((kind, false)) => {
+                    let ok = stack.last().is_some_and(|(open, _)| *open == kind);
                     if !ok && !reported {
                         let (line, col) = pos_at(source, i);
                         // Внутри стека назовём то, что реально открыто: это и есть
                         // подсказка «где искать пропущенное закрытие».
                         let open = stack
                             .last()
-                            .map(|(kind, _)| format!("Сейчас открыт блок, ожидается «{kind}»."))
+                            .map(|(open, _)| {
+                                format!(
+                                    "Сейчас открыт блок, ожидается «{}» (или «{}»).",
+                                    open.close_ru(),
+                                    open.close_en()
+                                )
+                            })
                             .unwrap_or_else(|| "Открытых блоков нет.".to_string());
                         errors.push(ExprError::new_with_confidence(
                             line,
                             col,
                             ExprErrorKind::UnbalancedCodeBlock,
                             format!(
-                                "Ожидается «{expected}»: блок закрыт не тем ключевым словом. \
-                                 Модуль не компилируется. {open}"
+                                "Ожидается «{}» (или «{}»): блок закрыт не тем ключевым словом. \
+                                 Модуль не компилируется. {open}",
+                                kind.close_ru(),
+                                kind.close_en()
                             ),
                             Confidence::High,
                             None,
@@ -111,7 +164,7 @@ pub fn check_block_balance(source: &str, cleaned: &str, errors: &mut Vec<ExprErr
                         stack.pop();
                     }
                 }
-                _ => {}
+                None => {}
             }
             i = end;
             continue;
@@ -125,7 +178,7 @@ pub fn check_block_balance(source: &str, cleaned: &str, errors: &mut Vec<ExprErr
 }
 
 /// Сообщить о незакрытом блоке (по одному сообщению — о первом).
-fn report_unclosed(source: &str, stack: &[(&'static str, usize)], errors: &mut Vec<ExprError>) {
+fn report_unclosed(source: &str, stack: &[(BlockKind, usize)], errors: &mut Vec<ExprError>) {
     let Some((kind, byte)) = stack.first() else {
         return;
     };
@@ -134,7 +187,11 @@ fn report_unclosed(source: &str, stack: &[(&'static str, usize)], errors: &mut V
         line,
         col,
         ExprErrorKind::UnbalancedCodeBlock,
-        format!("Блок не закрыт: ожидается «{kind}». Модуль не компилируется."),
+        format!(
+            "Блок не закрыт: ожидается «{}» (или «{}»). Модуль не компилируется.",
+            kind.close_ru(),
+            kind.close_en()
+        ),
         Confidence::High,
         None,
         Vec::new(),
@@ -400,6 +457,60 @@ mod tests {
         check_block_balance(src, &cleaned, &mut errors);
         check_member_access_on_expression(src, &cleaned, &mut errors);
         errors.into_iter().map(|e| (e.kind, e.message)).collect()
+    }
+
+    /// Issue #30: смешанные языки ключевых слов — ЗАКОННАЯ пара.
+    ///
+    /// Платформа компилирует все сочетания (`If … КонецЕсли`, `Если … EndIf`,
+    /// `Пока … Цикл … EndDo`, `Try … Исключение … КонецПопытки`), проверено автором
+    /// issue на 8.3.17.1549 и 8.3.27.2214 через `Выполнить()`. Прежняя сверка строк
+    /// давала на таком коде ложные `unbalanced_code_block` с confidence high.
+    #[test]
+    fn mixed_language_block_pairs_are_clean() {
+        for src in [
+            "Процедура Тест()\n\tЕсли 1 = 1 Тогда\n\t\tА = 1;\n\tКонецЕсли;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tIf 1 = 1 Тогда\n\t\tА = 1;\n\tКонецЕсли;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tЕсли 1 = 1 Тогда\n\t\tА = 1;\n\tEndIf;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tIf 1 = 1 Then\n\t\tА = 1;\n\tКонецЕсли;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tПока Ложь Цикл\n\t\tА = 1;\n\tEndDo;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tДля Каждого Э Из М Цикл\n\t\tА = 1;\n\tКонецЦикла;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tWhile Ложь Do\n\t\tА = 1;\n\tКонецЦикла;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tTry\n\t\tА = 1;\n\tИсключение\n\tКонецПопытки;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tПопытка\n\t\tА = 1;\n\tExcept\n\tEndTry;\nКонецПроцедуры\n",
+        ] {
+            let found = findings(src);
+            assert!(found.is_empty(), "ложная находка на {src:?}: {found:?}");
+        }
+    }
+
+    /// Обратная сторона: закрытие словом ДРУГОГО смысла — по-прежнему ошибка.
+    #[test]
+    fn wrong_meaning_close_is_still_reported() {
+        for src in [
+            "Процедура Тест()\n\tЕсли 1 = 1 Тогда\n\t\tА = 1;\n\tКонецЦикла;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tЕсли 1 = 1 Тогда\n\t\tА = 1;\n\tEndDo;\nКонецПроцедуры\n",
+            "Процедура Тест()\n\tПопытка\n\t\tА = 1;\n\tКонецЕсли;\nКонецПроцедуры\n",
+        ] {
+            let found = findings(src);
+            assert_eq!(
+                found.len(),
+                1,
+                "ожидалась одна находка на {src:?}: {found:?}"
+            );
+            assert_eq!(found[0].0, ExprErrorKind::UnbalancedCodeBlock);
+        }
+    }
+
+    /// Незакрытый блок виден и в английском написании.
+    #[test]
+    fn unclosed_english_block_is_reported() {
+        let found = findings("Процедура Тест()\n\tIf 1 = 1 Тогда\n\t\tА = 1;\nКонецПроцедуры\n");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].1.contains("КонецЕсли") || found[0].1.contains("EndIf"),
+            "в сообщении должно быть ожидаемое слово: {}",
+            found[0].1
+        );
     }
 
     #[test]
