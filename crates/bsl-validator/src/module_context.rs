@@ -40,6 +40,18 @@ pub enum ModuleKind {
     Other,
 }
 
+/// Вид формы, определённый ПО ФАЙЛАМ ВЫГРУЗКИ, а не по тексту модуля.
+///
+/// В выгрузке рядом с модулем формы лежит `Ext/Form.xml` (форма управляемая) или
+/// `Ext/Form.bin` (обычная). Для целого модуля вид виден по директивам компиляции,
+/// но у ФРАГМЕНТА управляемой формы директив в тексте нет — и без этой подсказки
+/// он считался бы обычной формой, а её контекст — объектом-владельцем (issue #32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormKind {
+    Managed,
+    Ordinary,
+}
+
 /// Вид модуля по пути выгрузки.
 pub fn module_kind(module_path: &str) -> ModuleKind {
     let path = module_path.replace('\\', "/").to_lowercase();
@@ -135,6 +147,7 @@ pub fn context_type<'a>(
     index: &'a PlatformIndex,
     module_path: &str,
     has_directives: bool,
+    form_kind: Option<FormKind>,
 ) -> Option<&'a Type> {
     let kind = module_kind(module_path);
     let (folder, _name) = owner_of(module_path)?;
@@ -144,12 +157,19 @@ pub fn context_type<'a>(
         ModuleKind::RecordSet => record_set_prefix_of(folder),
         // У обычной формы доступны методы объекта-владельца, у управляемой — нет:
         // её контекст — сама форма, а она в списке динамических типов.
-        ModuleKind::Form => {
-            if has_directives {
-                return None;
+        ModuleKind::Form => match form_kind {
+            // Вид формы, снятый с файлов выгрузки, главнее признака по директивам:
+            // у фрагмента управляемой формы директив в тексте просто нет (issue #32).
+            Some(FormKind::Managed) => return None,
+            Some(FormKind::Ordinary) => object_prefix_of(folder),
+            // Вид неизвестен (корня выгрузки нет) — прежний признак: директивы.
+            None => {
+                if has_directives {
+                    return None;
+                }
+                object_prefix_of(folder)
             }
-            object_prefix_of(folder)
-        }
+        },
         ModuleKind::Other => None,
     }?;
     template_type(index, prefix)
@@ -243,5 +263,47 @@ mod tests {
         // Не путь выгрузки — не угадываем.
         assert_eq!(owner_of("Модуль.bsl"), None);
         assert_eq!(owner_of("SomeFolder/Х/Ext/ObjectModule.bsl"), None);
+    }
+
+    /// Issue #32: у ФРАГМЕНТА управляемой формы директив компиляции в тексте нет,
+    /// поэтому вид формы приходит из выгрузки (`Ext/Form.xml` — управляемая,
+    /// `Ext/Form.bin` — обычная) и главнее признака по директивам. Директивы
+    /// остаются запасным признаком, когда вида формы нет (корня выгрузки нет).
+    #[test]
+    fn form_kind_overrides_directives() {
+        use platform_index::{Method, Type};
+
+        let mut index = PlatformIndex::new();
+        index.insert_type(Type {
+            name_ru: "ДокументОбъект.<Имя документа>".into(),
+            name_en: String::new(),
+            description: String::new(),
+            methods: vec![Method {
+                name_ru: "ПолучитьФорму".into(),
+                name_en: String::new(),
+                description: String::new(),
+                return_type: String::new(),
+                signatures: Vec::new(),
+            }],
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: Vec::new(),
+        });
+
+        let path = "Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl";
+        let found = |kind: Option<FormKind>, directives: bool| {
+            context_type(&index, path, directives, kind).map(|t| t.name_ru.clone())
+        };
+        let object_context = Some("ДокументОбъект.<Имя документа>".to_string());
+
+        // Вид формы из выгрузки главнее директив в тексте.
+        assert_eq!(found(Some(FormKind::Managed), false), None);
+        assert_eq!(
+            found(Some(FormKind::Ordinary), true),
+            object_context.clone()
+        );
+        // Вида нет — работает прежний признак: директивы компиляции.
+        assert_eq!(found(None, false), object_context);
+        assert_eq!(found(None, true), None);
     }
 }
