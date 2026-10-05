@@ -112,6 +112,16 @@ pub struct SymbolSourceConfig {
     /// Имя репозитория в code-index, если оно отличается от алиаса конфигурации
     /// (`repo`). Только для `kind = "code_index_mcp"`. Не задано — берётся `repo`.
     pub code_index_repo: Option<String>,
+    /// Как часто источник проверяет, не изменилась ли его база, мс. `0` — не
+    /// проверять (снимок до переподключения).
+    ///
+    /// Нужно сценарию «добавил объект в выгрузку → пишу код, который к нему
+    /// обращается → проверяю»: без проверки источник отвечает снимком на момент
+    /// подключения, и только что созданный объект выглядит несуществующим
+    /// (`unknown_metadata_object`) до ручного `reconnect_symbol_source`
+    /// (issue #35). Соединение при этом живое и здоровое, само оно не
+    /// переподключается.
+    pub refresh_ms: u64,
     /// Таймаут HTTP, мс.
     pub timeout_ms: u64,
 }
@@ -125,6 +135,7 @@ impl Default for SymbolSourceConfig {
             url: None,
             repo: None,
             code_index_repo: None,
+            refresh_ms: symbol_source::DEFAULT_DB_REFRESH_MS,
             timeout_ms: 5000,
         }
     }

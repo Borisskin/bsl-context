@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OpenFlags};
@@ -170,18 +170,40 @@ impl SymbolSource for LiteSource {
 /// раз при открытии. `owner_exports` работает отдельно: путь модуля-владельца
 /// выводится из пути формы (индекс не нужен), а его экспортные методы — из сигнатуры.
 pub struct CodeIndexDbSource {
-    /// Имена функций (в нижнем регистре) — SQLite `lower()` не сворачивает
-    /// кириллицу, поэтому регистр приводится в Rust один раз при открытии.
-    names: HashSet<String>,
+    /// Снимок содержимого базы: имена, объекты, глобальные экспорты. Хранится
+    /// под мьютексом, потому что пересобирается, когда база изменилась
+    /// (issue #35), а сам источник живёт в `Arc` из нескольких обработчиков.
+    snapshot: Mutex<DbSnapshot>,
     db_path: PathBuf,
-    /// Соединение с базой (read-only). Нужно только `owner_exports` — точечный
-    /// запрос на модуль; `method_exists` отвечает из памяти.
+    /// Соединение с базой (read-only). Нужно только `owner_exports` и составу
+    /// объекта — точечным запросам; остальное отвечает из памяти.
     conn: Mutex<Connection>,
+    /// Состав объектов, лениво. В отличие от имён, `attributes_json` тяжёлый
+    /// (у документа УТ — сотни реквизитов), а спрашивают его лишь про те
+    /// объекты, что встретились источниками запроса. `None` в значении —
+    /// «объект есть, состава у него нет», такой ответ тоже кэшируется.
+    schema_cache: Mutex<HashMap<String, Option<ObjectSchema>>>,
+    /// Как часто проверять, не изменилась ли база. `Duration::ZERO` — не
+    /// проверять (поведение до правки issue #35: снимок до переподключения).
+    refresh: Duration,
+    /// Когда базу проверяли и каким был её отпечаток на той проверке.
+    stamp: Mutex<StampState>,
+}
+
+/// Снимок содержимого базы: собирается при открытии и пересобирается, когда
+/// `code-index` дописал в неё новые имена и объекты.
+#[derive(Default)]
+struct DbSnapshot {
+    /// Имена функций (в нижнем регистре) — SQLite `lower()` не сворачивает
+    /// кириллицу, поэтому регистр приводится в Rust.
+    names: HashSet<String>,
     /// Экспортные имена методов глобальных общих модулей (нижний регистр).
-    /// Собираются при открытии ИЗ САМОЙ БАЗЫ: XML общих модулей лежат в
-    /// `file_contents` (zstd), признак — `<Global>true</Global>`. Отдельного
-    /// флага у `code-index` нет, но исходный XML он хранит.
+    /// Собираются ИЗ САМОЙ БАЗЫ: XML общих модулей лежат в `file_contents`
+    /// (zstd), признак — `<Global>true</Global>`. Отдельного флага у
+    /// `code-index` нет, но исходный XML он хранит.
     global_exports: HashSet<String>,
+    /// Экспортные переменные модулей приложения (нижний регистр).
+    global_vars: HashSet<String>,
     /// Объекты конфигурации по `meta_type` (таблица `metadata_objects`), в
     /// исходном регистре. `None` — таблицы нет: это не BSL-индекс, либо старая
     /// версия без неё. НИКАКОГО вывода имён из путей модулей — у объекта может
@@ -192,24 +214,12 @@ pub struct CodeIndexDbSource {
     /// спросить состав объекта точечным SQL: сравнивать регистр в SQLite
     /// нельзя — его `lower()` кириллицу не сворачивает.
     objects_orig_by_lower: Option<HashMap<String, HashMap<String, String>>>,
-    /// Экспортные переменные модулей приложения (нижний регистр). Собираются
-    /// один раз при открытии из `file_contents` (zstd) — как и `global_exports`.
-    global_vars: HashSet<String>,
-    /// Состав объектов, лениво. В отличие от имён, `attributes_json` тяжёлый
-    /// (у документа УТ — сотни реквизитов), а спрашивают его лишь про те
-    /// объекты, что встретились источниками запроса. `None` в значении —
-    /// «объект есть, состава у него нет», такой ответ тоже кэшируется.
-    schema_cache: Mutex<HashMap<String, Option<ObjectSchema>>>,
 }
 
-impl CodeIndexDbSource {
-    pub fn open(db_path: &Path) -> Result<Self> {
-        let conn = Connection::open_with_flags(
-            db_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-        )
-        .with_context(|| format!("не удалось открыть code-index базу {}", db_path.display()))?;
-
+impl DbSnapshot {
+    /// Прочитать снимок из базы. Ошибка чтения таблицы `functions` фатальна:
+    /// это не BSL-индекс либо база в середине пересборки.
+    fn collect(conn: &Connection) -> Result<Self> {
         let mut stmt = conn
             .prepare("SELECT name FROM functions")
             .with_context(|| "code-index база: не найдена таблица functions")?;
@@ -220,8 +230,7 @@ impl CodeIndexDbSource {
         }
         drop(stmt);
 
-        let global_exports = Self::collect_global_exports(&conn);
-        let objects = Self::collect_objects(&conn);
+        let objects = CodeIndexDbSource::collect_objects(conn);
         let objects_lower = objects.as_ref().map(|by_type| {
             by_type
                 .iter()
@@ -233,7 +242,6 @@ impl CodeIndexDbSource {
                 })
                 .collect()
         });
-
         let objects_orig_by_lower = objects.as_ref().map(|by_type| {
             by_type
                 .iter()
@@ -247,19 +255,148 @@ impl CodeIndexDbSource {
                 .collect()
         });
 
-        let global_vars = Self::collect_global_vars(&conn);
-
         Ok(Self {
             names,
-            db_path: db_path.to_path_buf(),
-            conn: Mutex::new(conn),
-            global_exports,
+            global_exports: CodeIndexDbSource::collect_global_exports(conn),
+            global_vars: CodeIndexDbSource::collect_global_vars(conn),
             objects,
             objects_lower,
             objects_orig_by_lower,
-            global_vars,
-            schema_cache: Mutex::new(HashMap::new()),
         })
+    }
+}
+
+/// Отпечаток файлов базы: `(mtime, размер)` для `index.db` и его WAL. Свежая
+/// индексация `code-index` видна именно здесь: в режиме WAL новые строки
+/// попадают в `-wal`, и mtime основной базы может не измениться вовсе.
+type DbStamp = (u128, u64, u128, u64);
+
+/// Состояние проверки «база изменилась?»: когда проверяли и что видели.
+struct StampState {
+    checked_at: Option<Instant>,
+    stamp: DbStamp,
+}
+
+/// Как часто по умолчанию проверять, не изменилась ли база (issue #35).
+///
+/// Пять секунд — компромисс: сценарий «добавил объект в выгрузку → проверяю
+/// код, который к нему обращается» ждёт не больше пяти секунд, а активная
+/// индексация не заставляет пересобирать снимок на каждый запрос.
+pub const DEFAULT_DB_REFRESH_MS: u64 = 5000;
+
+/// `(mtime, размер)` одного файла. Отсутствующий файл — нули: у базы может не
+/// быть WAL, это нормальное состояние, а не ошибка.
+fn file_stamp(path: &Path) -> (u128, u64) {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            (mtime, meta.len())
+        }
+        Err(_) => (0, 0),
+    }
+}
+
+/// Отпечаток базы и её WAL — см. [`DbStamp`].
+fn db_stamp(db_path: &Path) -> DbStamp {
+    let wal = PathBuf::from(format!("{}-wal", db_path.display()));
+    let (mtime, size) = file_stamp(db_path);
+    let (wal_mtime, wal_size) = file_stamp(&wal);
+    (mtime, size, wal_mtime, wal_size)
+}
+
+impl CodeIndexDbSource {
+    pub fn open(db_path: &Path) -> Result<Self> {
+        Self::open_with_refresh(db_path, Duration::from_millis(DEFAULT_DB_REFRESH_MS))
+    }
+
+    /// Открыть источник с явным интервалом проверки изменений базы.
+    /// `Duration::ZERO` — снимок берётся один раз (поведение до issue #35).
+    pub fn open_with_refresh(db_path: &Path, refresh: Duration) -> Result<Self> {
+        let conn = Self::open_conn(db_path)?;
+        let snapshot = DbSnapshot::collect(&conn)?;
+        Ok(Self {
+            snapshot: Mutex::new(snapshot),
+            db_path: db_path.to_path_buf(),
+            conn: Mutex::new(conn),
+            schema_cache: Mutex::new(HashMap::new()),
+            refresh,
+            stamp: Mutex::new(StampState {
+                checked_at: None,
+                stamp: db_stamp(db_path),
+            }),
+        })
+    }
+
+    fn open_conn(db_path: &Path) -> Result<Connection> {
+        Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .with_context(|| format!("не удалось открыть code-index базу {}", db_path.display()))
+    }
+
+    /// Пересобрать снимок, если база изменилась. Проверка — не чаще `refresh`.
+    ///
+    /// Ложная находка `unknown_metadata_object` на только что добавленный
+    /// объект (issue #35) стоила дороже лишнего чтения базы: соединение живое
+    /// и здоровое, поэтому само оно не переподключалось, и объект «не
+    /// существовал» до ручного `reconnect_symbol_source`.
+    fn refresh_if_stale(&self) {
+        if self.refresh.is_zero() {
+            return;
+        }
+        let now = Instant::now();
+        {
+            let state = self.stamp.lock().unwrap();
+            if state
+                .checked_at
+                .is_some_and(|at| now.duration_since(at) < self.refresh)
+            {
+                return;
+            }
+        }
+        let fresh = db_stamp(&self.db_path);
+        {
+            let mut state = self.stamp.lock().unwrap();
+            state.checked_at = Some(now);
+            if state.stamp == fresh {
+                return;
+            }
+        }
+        match self.reload() {
+            Ok(()) => tracing::info!(
+                db = %self.db_path.display(),
+                "code-index база изменилась — снимок имён и объектов пересобран"
+            ),
+            Err(e) => tracing::warn!(
+                error = %e,
+                db = %self.db_path.display(),
+                "code-index база изменилась, но пересобрать снимок не удалось — \
+                 работаем на прежнем до следующей проверки"
+            ),
+        }
+    }
+
+    /// Пересобрать снимок и переоткрыть соединение. Переоткрываем потому, что
+    /// при переиндексации `code-index` файл базы может быть заменён целиком, и
+    /// прежнее соединение осталось бы на старом файле.
+    fn reload(&self) -> Result<()> {
+        let conn = Self::open_conn(&self.db_path)?;
+        let snapshot = DbSnapshot::collect(&conn)?;
+        *self.conn.lock().unwrap() = conn;
+        *self.snapshot.lock().unwrap() = snapshot;
+        self.schema_cache.lock().unwrap().clear();
+        // Отпечаток снимаем ПОСЛЕ чтения: если база дописана во время
+        // пересборки, следующая проверка увидит это и перечитает снова.
+        let mut state = self.stamp.lock().unwrap();
+        state.stamp = db_stamp(&self.db_path);
+        state.checked_at = Some(Instant::now());
+        Ok(())
     }
 
     /// Экспортные переменные модулей приложения. Текст модуля лежит в самой
@@ -395,17 +532,24 @@ impl CodeIndexDbSource {
 impl SymbolSource for CodeIndexDbSource {
     /// Экспортный метод глобального общего модуля: зовётся без префикса откуда угодно.
     fn is_global_export(&self, name_lower: &str) -> bool {
-        self.global_exports.contains(name_lower)
+        self.refresh_if_stale();
+        self.snapshot
+            .lock()
+            .unwrap()
+            .global_exports
+            .contains(name_lower)
     }
 
     fn method_exists(&self, name_lower: &str) -> bool {
-        self.names.contains(name_lower)
+        self.refresh_if_stale();
+        self.snapshot.lock().unwrap().names.contains(name_lower)
     }
 
     /// Экспортные методы модуля объекта-владельца. Путь владельца выводится из
     /// пути формы (индекс не нужен), экспортность — по ключевому слову в
     /// сигнатуре: отдельного флага в базе нет.
     fn owner_exports(&self, module_path: &str) -> Option<HashSet<String>> {
+        self.refresh_if_stale();
         let owner = lite_index::owner_module_path(module_path)?;
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
@@ -426,8 +570,10 @@ impl SymbolSource for CodeIndexDbSource {
     }
 
     fn object_exists(&self, collection: &str, name_lower: &str) -> Option<bool> {
+        self.refresh_if_stale();
         let meta_type = meta_type_for_collection(collection)?;
-        let by_type = self.objects_lower.as_ref()?;
+        let snapshot = self.snapshot.lock().unwrap();
+        let by_type = snapshot.objects_lower.as_ref()?;
         match by_type.get(meta_type) {
             Some(names) => Some(names.contains(name_lower)),
             None => Some(false),
@@ -435,21 +581,29 @@ impl SymbolSource for CodeIndexDbSource {
     }
 
     fn collection_names(&self, collection: &str) -> Option<HashSet<String>> {
+        self.refresh_if_stale();
         let meta_type = meta_type_for_collection(collection)?;
-        self.objects
+        self.snapshot
+            .lock()
+            .unwrap()
+            .objects
             .as_ref()
             .and_then(|by_type| by_type.get(meta_type).cloned())
     }
 
     fn object_schema(&self, collection: &str, name_lower: &str) -> Option<ObjectSchema> {
+        self.refresh_if_stale();
         let meta_type = meta_type_for_collection(collection)?;
         // Исходный регистр имени — иначе точечный SQL не найдёт строку.
-        let orig = self
-            .objects_orig_by_lower
-            .as_ref()?
-            .get(meta_type)?
-            .get(name_lower)?
-            .clone();
+        let orig = {
+            let snapshot = self.snapshot.lock().unwrap();
+            snapshot
+                .objects_orig_by_lower
+                .as_ref()?
+                .get(meta_type)?
+                .get(name_lower)?
+                .clone()
+        };
 
         let key = format!("{meta_type}.{orig}");
         if let Some(cached) = self.schema_cache.lock().unwrap().get(&key) {
@@ -465,15 +619,23 @@ impl SymbolSource for CodeIndexDbSource {
     }
 
     fn global_variables(&self) -> Option<HashSet<String>> {
-        Some(self.global_vars.clone())
+        self.refresh_if_stale();
+        Some(self.snapshot.lock().unwrap().global_vars.clone())
     }
 
     fn describe(&self) -> String {
+        let snapshot = self.snapshot.lock().unwrap();
+        let refresh = if self.refresh.is_zero() {
+            "обновление снимка выключено".to_string()
+        } else {
+            format!("снимок обновляется раз в {} мс", self.refresh.as_millis())
+        };
         format!(
-            "code-index db: {} ({} имён, {} глобальных экспортов)",
+            "code-index db: {} ({} имён, {} глобальных экспортов, {})",
             self.db_path.display(),
-            self.names.len(),
-            self.global_exports.len()
+            snapshot.names.len(),
+            snapshot.global_exports.len(),
+            refresh
         )
     }
 }
@@ -2213,6 +2375,101 @@ data: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabili
             names.contains("сведенияовнешнейобработке"),
             "экспорты владельца не найдены, получено {} имён",
             names.len()
+        );
+    }
+
+    /// Issue #35: объект и метод, появившиеся в базе ПОСЛЕ подключения
+    /// источника, обязаны находиться сами — без `reconnect_symbol_source`.
+    /// До правки источник держал снимок с момента открытия, а соединение было
+    /// живым и здоровым, поэтому не переподключалось: только что созданный
+    /// объект считался несуществующим (`unknown_metadata_object`).
+    #[test]
+    fn code_index_db_source_refreshes_after_db_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("index.db");
+        let exec = |sql: &str| {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(sql).unwrap();
+        };
+        exec(
+            "CREATE TABLE functions (name TEXT NOT NULL);
+             CREATE TABLE metadata_objects (meta_type TEXT, name TEXT);
+             INSERT INTO functions (name) VALUES ('СтарыйМетод');
+             INSERT INTO metadata_objects (meta_type, name) VALUES ('Constant', 'СтараяКонстанта');",
+        );
+
+        // Интервал 1 мс: `Duration::ZERO` — это «проверку выключить», для теста
+        // он не годится, а ждать пять секунд боевого дефолта незачем.
+        let source =
+            CodeIndexDbSource::open_with_refresh(&db_path, Duration::from_millis(1)).unwrap();
+        assert_eq!(
+            source.object_exists("Constants", "стараяконстанта"),
+            Some(true)
+        );
+        assert_eq!(
+            source.object_exists("Constants", "новаяконстанта"),
+            Some(false)
+        );
+        assert!(!source.method_exists("новыйметод"));
+
+        exec(
+            "INSERT INTO metadata_objects (meta_type, name) VALUES ('Constant', 'НоваяКонстанта');
+             INSERT INTO functions (name) VALUES ('НовыйМетод');
+             DELETE FROM metadata_objects WHERE name = 'СтараяКонстанта';",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert_eq!(
+            source.object_exists("Constants", "новаяконстанта"),
+            Some(true),
+            "добавленный объект должен находиться после обновления снимка"
+        );
+        assert!(
+            source.method_exists("новыйметод"),
+            "добавленное имя метода должно находиться после обновления снимка"
+        );
+        assert_eq!(
+            source.object_exists("Constants", "стараяконстанта"),
+            Some(false),
+            "удалённый объект не должен считаться существующим"
+        );
+        // Контроль: выдуманный объект остаётся несуществующим и после обновления.
+        assert_eq!(
+            source.object_exists("Constants", "выдуманнаяконстанта"),
+            Some(false)
+        );
+    }
+
+    /// `refresh = 0` в конфиге — прежнее поведение: снимок берётся один раз и
+    /// живёт до переподключения источника.
+    #[test]
+    fn code_index_db_source_refresh_can_be_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("index.db");
+        let exec = |sql: &str| {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(sql).unwrap();
+        };
+        exec(
+            "CREATE TABLE functions (name TEXT NOT NULL);\
+              CREATE TABLE metadata_objects (meta_type TEXT, name TEXT);",
+        );
+
+        let source = CodeIndexDbSource::open_with_refresh(&db_path, Duration::ZERO).unwrap();
+        assert_eq!(
+            source.object_exists("Constants", "новаяконстанта"),
+            Some(false)
+        );
+
+        exec(
+            "INSERT INTO metadata_objects (meta_type, name) VALUES ('Constant', 'НоваяКонстанта');",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert_eq!(
+            source.object_exists("Constants", "новаяконстанта"),
+            Some(false),
+            "при выключенной проверке снимок не пересобирается"
         );
     }
 
