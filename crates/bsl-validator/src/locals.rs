@@ -137,6 +137,25 @@ impl<'a> LocalNames<'a> {
             .iter()
             .filter(|a| a.byte <= byte && self.same_scope(byte, a.byte))
             .max_by_key(|a| a.byte)?;
+
+        // Переменная цикла переопределяет имя с НАЧАЛА тела цикла (issue #36):
+        // `Х = Новый Массив; … Для Каждого Х Из С Цикл Х.Значение` — здесь `Х`
+        // уже элемент коллекции, а не прежний массив. Тип элемента выводится не
+        // всегда (`Соответствие` → `КлючИЗначение`, `Массив` → неизвестен),
+        // поэтому после такого переопределения тип считаем НЕИЗВЕСТНЫМ, а не
+        // прежним: молчание лучше находки про чужой тип — тот же выбор, что в #29.
+        if self
+            .loop_vars_by_name
+            .get(&name_lower)
+            .is_some_and(|sites| {
+                sites.iter().any(|site| {
+                    nearest.byte < *site && *site <= byte && self.same_scope(byte, *site)
+                })
+            })
+        {
+            return None;
+        }
+
         let mut types: Vec<String> = vec![nearest.new_type.as_deref()?.to_string()];
 
         // Ветви того же условного оператора, уже закрытого к этой точке.
@@ -343,6 +362,32 @@ mod tests {
         assert_eq!(
             locals.constructed_type(byte, "Запрос"),
             Some(vec!["Запрос".to_string()])
+        );
+    }
+
+    /// Issue #36, класс 2: переменная цикла переопределяет имя с НАЧАЛА тела цикла,
+    /// поэтому тип из присваивания ВЫШЕ цикла к телу уже не относится. До правки
+    /// `Х = Новый Массив; … Для Каждого Х Из С Цикл Х.Значение` давало находку про
+    /// тип `Массив` — ложную (в реальности `Х` — элемент соответствия).
+    #[test]
+    fn loop_variable_resets_constructed_type() {
+        let src = "Процедура Т()\n\tХ = Новый Массив;\n\tС = Новый Соответствие;\n\tДля Каждого Х Из С Цикл\n\t\tЗ = Х.Значение;\n\tКонецЦикла;\nКонецПроцедуры\n";
+        let facts = bsl_parse::collect_facts(src);
+        let locals = LocalNames::new(&facts);
+
+        let inside = byte_of(src, "Х.Значение");
+        assert_eq!(
+            locals.constructed_type(inside, "Х"),
+            None,
+            "после заголовка цикла прежний тип не действует"
+        );
+
+        // Контроль: ВЫШЕ цикла прежний тип ещё действует — правило не выключает
+        // проверку вообще, а только с начала тела цикла.
+        let before = byte_of(src, "С = Новый Соответствие");
+        assert_eq!(
+            locals.constructed_type(before, "Х"),
+            Some(vec!["Массив".to_string()])
         );
     }
 

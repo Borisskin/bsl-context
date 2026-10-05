@@ -156,6 +156,7 @@ fn validate_module_at_level_inner_ext(
             &annotations,
             level,
             &facts.if_branches,
+            &facts.loop_var_sites,
         ))
     } else {
         None
@@ -188,6 +189,17 @@ fn validate_module_at_level_inner_ext(
     let form_module = module_path
         .map(crate::context_names::is_form_module)
         .unwrap_or(false);
+    // Модуль набора записей регистра: `Отбор` в нём — фильтр набора, а не
+    // одноимённый платформенный тип (issue #36, класс 3). `None` — любой другой
+    // модуль либо путь не из выгрузки.
+    let record_set: Option<(&str, &str)> = module_path.and_then(|path| {
+        if crate::module_context::module_kind(path) == crate::module_context::ModuleKind::RecordSet
+        {
+            crate::module_context::owner_of_anywhere(path)
+        } else {
+            None
+        }
+    });
     let locals = LocalNames::new(&facts);
     check_type_dot_members(
         index,
@@ -196,6 +208,8 @@ fn validate_module_at_level_inner_ext(
         scope_map.as_ref(),
         Some(&locals),
         form_module,
+        symbols,
+        record_set,
         &mut errors,
     );
     check_new_expressions(index, source, &facts.news, &mut errors);

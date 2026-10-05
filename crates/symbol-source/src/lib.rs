@@ -1343,6 +1343,7 @@ fn meta_type_for_collection(collection: &str) -> Option<&'static str> {
         "AccountingRegisters" => Some("AccountingRegister"),
         "CalculationRegisters" => Some("CalculationRegister"),
         "Enums" => Some("Enum"),
+        "SessionParameters" => Some("SessionParameter"),
         // Три плана — единственный случай, где `meta_type` остаётся во
         // множественном числе (проверено: `SELECT DISTINCT meta_type` даёт
         // `ChartOfCharacteristicTypes` на УТ, `ChartOfAccounts` на БП).

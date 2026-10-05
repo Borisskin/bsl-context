@@ -32,7 +32,7 @@ use std::sync::OnceLock;
 
 use platform_index::PlatformIndex;
 
-use bsl_parse::IfBranches;
+use bsl_parse::{IfBranches, NameSite};
 
 /// Один scope — привязки имён в пределах одной процедуры (или модуля, если
 /// процедур нет).
@@ -209,6 +209,7 @@ pub fn extract_scope_map(
     annotations: &HashMap<usize, String>,
     level: u8,
     if_branches: &[IfBranches],
+    loop_var_sites: &[NameSite],
 ) -> ScopeMap {
     let mut scopes = Vec::new();
     let blocks: Vec<(usize, usize)> = proc_block_re()
@@ -226,12 +227,22 @@ pub fn extract_scope_map(
             annotations,
             level,
             if_branches,
+            loop_var_sites,
         );
         scopes.push(scope);
     } else {
         for (start, end) in blocks {
             let body = &cleaned[start..end];
-            let scope = build_scope(index, body, start, end, annotations, level, if_branches);
+            let scope = build_scope(
+                index,
+                body,
+                start,
+                end,
+                annotations,
+                level,
+                if_branches,
+                loop_var_sites,
+            );
             scopes.push(scope);
         }
     }
@@ -257,6 +268,7 @@ pub fn extract_type_annotations(src: &str) -> HashMap<usize, String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_scope(
     index: &PlatformIndex,
     body: &str,
@@ -265,6 +277,7 @@ fn build_scope(
     annotations: &HashMap<usize, String>,
     level: u8,
     if_branches: &[IfBranches],
+    loop_var_sites: &[NameSite],
 ) -> Scope {
     let mut bindings: Vec<VarBinding> = Vec::new();
     // Ветви, целиком лежащие внутри этого scope: объединение типов после
@@ -364,6 +377,25 @@ fn build_scope(
             types: typ.unwrap_or_default(),
         });
     }
+
+    // Переменные циклов: заголовок `Для Каждого Х Из С Цикл` переопределяет имя
+    // с НАЧАЛА тела цикла (issue #36, класс 2). Привязка с ПУСТЫМ списком типов —
+    // «тип неизвестен»: прежний тип из присваивания ВЫШЕ цикла к телу уже не
+    // относится (иначе `Х = Новый Массив; … Для Каждого Х Из С Цикл Х.Значение`
+    // даёт находку про `Массив`). Тип элемента коллекции выводится не всегда,
+    // поэтому молчание здесь лучше находки про чужой тип — тот же выбор, что в #29.
+    for site in loop_var_sites {
+        if byte_start <= site.byte && site.byte < byte_end {
+            bindings.push(VarBinding {
+                name: site.name.clone(),
+                byte: site.byte,
+                types: Vec::new(),
+            });
+        }
+    }
+    // `type_of_var` берёт БЛИЖАЙШУЮ привязку через `.rev().find(..)` — вектор
+    // обязан быть упорядочен по `byte`.
+    bindings.sort_by_key(|b| b.byte);
 
     Scope {
         byte_start,
@@ -849,7 +881,7 @@ mod tests {
         let src = "Запрос = Новый Запрос;\nРез = Запрос.Выполнить();\nВыб = Рез.Выбрать();\n";
         let annotations = HashMap::new();
         // level=3 — цепочки выводятся
-        let map3 = extract_scope_map(&idx, src, &annotations, 3, &[]);
+        let map3 = extract_scope_map(&idx, src, &annotations, 3, &[], &[]);
         assert_var(&map3, src.len() - 1, "запрос", "Запрос");
         assert_var(&map3, src.len() - 1, "рез", "РезультатЗапроса");
         assert_var(&map3, src.len() - 1, "выб", "ВыборкаИзРезультатаЗапроса");
@@ -861,7 +893,7 @@ mod tests {
         let src = "Запрос = Новый Запрос;\nРез = Запрос.Выполнить();\n";
         let annotations = HashMap::new();
         // level=2 — return-type НЕ выводится (регрессия не должна появиться)
-        let map2 = extract_scope_map(&idx, src, &annotations, 2, &[]);
+        let map2 = extract_scope_map(&idx, src, &annotations, 2, &[], &[]);
         assert_var(&map2, src.len() - 1, "запрос", "Запрос"); // из Новый — есть
         assert!(map2.type_of_var(src.len() - 1, "рез").is_none()); // из вызова — нет на level=2
     }
@@ -873,7 +905,7 @@ mod tests {
         let idx = mock_index();
         let annotations = HashMap::new();
         let src = "Выборка = Новый Запрос;\nВыборка = СоздатьЧтоТоНеизвестное();\nВыборка.Текст = \"х\";\n";
-        let map = extract_scope_map(&idx, src, &annotations, 3, &[]);
+        let map = extract_scope_map(&idx, src, &annotations, 3, &[], &[]);
         assert!(
             map.type_of_var(src.len() - 1, "выборка").is_none(),
             "после присваивания с невыводимым типом тип должен быть неизвестен, а не прежний"
@@ -881,7 +913,7 @@ mod tests {
 
         // Контроль: без второго присваивания прежний тип на месте.
         let src2 = "Выборка = Новый Запрос;\nВыборка.Текст = \"х\";\n";
-        let map2 = extract_scope_map(&idx, src2, &annotations, 3, &[]);
+        let map2 = extract_scope_map(&idx, src2, &annotations, 3, &[], &[]);
         assert_var(&map2, src2.len() - 1, "выборка", "Запрос");
     }
 
@@ -892,7 +924,7 @@ mod tests {
         let idx = mock_index();
         let annotations = HashMap::new();
         let src = "Запрос = Новый Запрос;\nРез = Запрос.Выполнить();\nРез = Рез.Выбрать();\n";
-        let map = extract_scope_map(&idx, src, &annotations, 3, &[]);
+        let map = extract_scope_map(&idx, src, &annotations, 3, &[], &[]);
 
         // Точка внутри правой части второго присваивания — тип ещё прежний.
         let dot_inside = src.find("Рез.Выбрать").unwrap() + "Рез".len();
@@ -900,5 +932,41 @@ mod tests {
 
         // После оператора — уже новый тип.
         assert_var(&map, src.len() - 1, "рез", "ВыборкаИзРезультатаЗапроса");
+    }
+
+    /// Issue #36, класс 2: переменная цикла переопределяет имя с НАЧАЛА тела
+    /// цикла в позиционном выводе типов (`ScopeMap`), а не только в
+    /// `constructed_type` (`locals`). Без этого `Х = Новый Массив; … Для Каждого
+    /// Х Из С Цикл Х.Значение` брало тип из присваивания ВЫШЕ цикла.
+    #[test]
+    fn loop_variable_resets_scope_map_type() {
+        let mut idx = mock_index();
+        idx.insert_type(ty("Массив", vec![], vec![]));
+        idx.insert_type(ty("Соответствие", vec![], vec![]));
+
+        let src = "Процедура Т()\nХ = Новый Массив;\nС = Новый Соответствие;\n\
+                   Для Каждого Х Из С Цикл\nЗ = Х.Значение;\nКонецЦикла;\nКонецПроцедуры\n";
+        let facts = bsl_parse::collect_facts(src);
+        let annotations = HashMap::new();
+        let map = extract_scope_map(
+            &idx,
+            src,
+            &annotations,
+            3,
+            &facts.if_branches,
+            &facts.loop_var_sites,
+        );
+
+        // Внутри тела цикла ближайшая привязка — переменная цикла с пустым
+        // списком типов: тип неизвестен, находки про прежний `Массив` быть не должно.
+        let inside = src.find("Х.Значение").expect("подстрока есть");
+        assert_eq!(map.type_of_var(inside, "Х"), None);
+
+        // Контроль: ВЫШЕ цикла прежний тип продолжает действовать.
+        let before = src.find("С = Новый Соответствие").expect("подстрока есть");
+        assert_eq!(
+            map.type_of_var(before, "Х"),
+            Some(vec!["Массив".to_string()])
+        );
     }
 }

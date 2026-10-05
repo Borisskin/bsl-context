@@ -138,6 +138,29 @@ pub fn owner_of(module_path: &str) -> Option<(&str, &str)> {
     Some((folder, name))
 }
 
+/// Папка выгрузки и имя объекта из пути модуля, когда перед коллекцией стоит ещё
+/// один каталог (`base/AccumulationRegisters/<Имя>/Ext/RecordSetModule.bsl`).
+///
+/// [`owner_of`] требует, чтобы коллекция была ПЕРВЫМ компонентом пути. Выгрузка
+/// целиком (`base`, `extensions`, `External` на верхнем уровне) это условие
+/// нарушает — тогда коллекция ищется СРЕДИ компонентов, а имя берётся следующим
+/// за ней. Порядок компонентов фиксирован, поэтому первое совпадение верное.
+///
+/// Отдельная функция, а не ослабление [`owner_of`]: от неё зависит контекст
+/// модуля (#19), и менять его поведение ради одной проверки нельзя.
+pub fn owner_of_anywhere(module_path: &str) -> Option<(&str, &str)> {
+    if let Some(owner) = owner_of(module_path) {
+        return Some(owner);
+    }
+    let parts: Vec<&str> = module_path
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty())
+        .collect();
+    parts
+        .windows(2)
+        .find_map(|pair| is_known_folder(pair[0]).then_some((pair[0], pair[1])))
+}
+
 /// Тип контекста модуля — из пути выгрузки и признака «в модуле есть директивы
 /// компиляции».
 ///
@@ -263,6 +286,28 @@ mod tests {
         // Не путь выгрузки — не угадываем.
         assert_eq!(owner_of("Модуль.bsl"), None);
         assert_eq!(owner_of("SomeFolder/Х/Ext/ObjectModule.bsl"), None);
+    }
+
+    /// Выгрузка целиком: перед коллекцией стоит каталог-обёртка (`base`), и
+    /// `owner_of` такую раскладку не разбирает — для проверки `Отбор` набора
+    /// записей (issue #36, класс 3) коллекция ищется среди компонентов пути.
+    #[test]
+    fn owner_is_found_under_dump_wrapper() {
+        assert_eq!(
+            owner_of_anywhere("base/AccumulationRegisters/ТоварыНаСкладах/Ext/RecordSetModule.bsl"),
+            Some(("AccumulationRegisters", "ТоварыНаСкладах"))
+        );
+        // Прежний путь продолжает работать.
+        assert_eq!(
+            owner_of_anywhere("Catalogs/ЕдиницыИзмерения/Ext/ManagerModule.bsl"),
+            Some(("Catalogs", "ЕдиницыИзмерения"))
+        );
+        // `owner_of` НЕ ослаблен: от него зависит контекст модуля (#19).
+        assert_eq!(
+            owner_of("base/AccumulationRegisters/Х/Ext/RecordSetModule.bsl"),
+            None
+        );
+        assert_eq!(owner_of_anywhere("Модуль.bsl"), None);
     }
 
     /// Issue #32: у ФРАГМЕНТА управляемой формы директив компиляции в тексте нет,

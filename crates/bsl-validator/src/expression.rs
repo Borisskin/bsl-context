@@ -390,6 +390,7 @@ pub fn validate_expression_at_level(
             &annotations,
             level,
             &facts.if_branches,
+            &facts.loop_var_sites,
         ))
     } else {
         None
@@ -405,6 +406,8 @@ pub fn validate_expression_at_level(
         scope_map.as_ref(),
         Some(&locals),
         false,
+        None,
+        None,
         &mut errors,
     );
     check_new_expressions(index, source, &facts.news, &mut errors);
@@ -471,6 +474,8 @@ pub(crate) fn check_type_dot_members(
     scope_map: Option<&ScopeMap>,
     locals: Option<&LocalNames>,
     form_module: bool,
+    symbols: Option<&dyn SymbolSource>,
+    record_set: Option<(&str, &str)>,
     errors: &mut Vec<ExprError>,
 ) {
     for dot in dots {
@@ -537,6 +542,55 @@ pub(crate) fn check_type_dot_members(
         // опечатка в имени метода должна находиться, как и раньше.
         if !dot.member_is_call && types.iter().any(|ty| is_dynamic_property_type(&ty.name_ru)) {
             continue;
+        }
+        // Класс 1 (issue #36): состав `ПараметрыСеанса` объявляет конфигурация,
+        // в справке платформы членов у этого типа нет (`Очистить` — единственный
+        // метод, он обрабатывается обычной проверкой ниже). Параметр сеанса
+        // сверяется с источником имён (`SessionParameter`), а не со справкой:
+        // имя есть в конфигурации — молчание; выдумано — находка; источник не
+        // настроен или не знает коллекцию — молчание (прежнее поведение).
+        if !dot.member_is_call
+            && types
+                .iter()
+                .any(|ty| crate::homoglyphs::same_after_fold(&ty.name_ru, "ПараметрыСеанса"))
+        {
+            match symbols.and_then(|s| s.object_exists("SessionParameters", &member.to_lowercase()))
+            {
+                Some(true) | None => continue,
+                Some(false) => {}
+            }
+        }
+        // Класс 3 (issue #36): `Отбор` набора записей регистра. В модуле набора
+        // записей голова `Отбор` — фильтр набора (свойство контекста), его поля —
+        // измерения регистра плюс стандартные поля, а не члены одноимённого
+        // платформенного типа `Отбор`. Состав известен — сверяем с ним; неизвестен
+        // — свойства молчат, методы проверяются как обычно (приём XBase, #31).
+        if !dot.member_is_call
+            && types
+                .iter()
+                .any(|ty| crate::homoglyphs::same_after_fold(&ty.name_ru, "Отбор"))
+        {
+            if let Some((collection, name)) = record_set {
+                match symbols.and_then(|s| s.object_schema(collection, &name.to_lowercase())) {
+                    Some(schema) => {
+                        let known = schema
+                            .dimensions
+                            .iter()
+                            .any(|f| crate::homoglyphs::same_after_fold(&f.name, member))
+                            || record_set_standard_fields(collection)
+                                .iter()
+                                .any(|f| crate::homoglyphs::same_after_fold(f, member));
+                        if known {
+                            continue;
+                        }
+                        // Не измерение и не стандартное поле — обычная проверка
+                        // ниже даст находку.
+                    }
+                    // Состава нет: источник не настроен или не знает регистр —
+                    // обращение к свойству `Отбор` не проверяем.
+                    None => continue,
+                }
+            }
         }
         // Член есть хотя бы у одной альтернативы — находки нет. Имена сверяются
         // со сведением латинско-кириллических двойников: в справке платформы
@@ -688,6 +742,32 @@ fn is_dynamic_property_type(name_ru: &str) -> bool {
     DYNAMIC_PROPERTY_TYPES
         .iter()
         .any(|entry| crate::homoglyphs::fold_lookalikes(entry) == folded)
+}
+
+/// Стандартные поля фильтра `Отбор` набора записей по виду регистра (issue #36).
+///
+/// Измерения добавляются из схемы источника имён; здесь — только поля, которые
+/// есть у всех регистров данного вида. Признаки «активность» и «независимость»
+/// в схему не входят, поэтому берём надмножество: молчание на реальном поле
+/// лучше ложной находки. `collection` — папка выгрузки (регистр букв не важен).
+fn record_set_standard_fields(collection: &str) -> &'static [&'static str] {
+    if collection.eq_ignore_ascii_case("AccumulationRegisters") {
+        &[
+            "Регистратор",
+            "Период",
+            "Активность",
+            "ВидДвижения",
+            "НомерСтроки",
+        ]
+    } else if collection.eq_ignore_ascii_case("InformationRegisters") {
+        &["Регистратор", "Период"]
+    } else if collection.eq_ignore_ascii_case("AccountingRegisters")
+        || collection.eq_ignore_ascii_case("CalculationRegisters")
+    {
+        &["Регистратор", "Период", "Активность", "НомерСтроки"]
+    } else {
+        &[]
+    }
 }
 
 /// Пары «контекст модуля — метод», для которых справка описывает ПЕРЕАДРЕСАЦИЮ
