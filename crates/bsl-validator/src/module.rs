@@ -801,11 +801,11 @@ EndFunction
         assert!(result.errors.is_empty(), "{:?}", result.errors);
     }
 
-    /// Issue #32: если имя есть и у контекста модуля, и в глобальном контексте, а
-    /// платформа переадресует вызов (справка `СправочникМенеджер.ПолучитьДанныеВыбора`:
-    /// «если в модуле менеджера указано два параметра, будет вызван метод
-    /// ПолучитьДанныеВыбора глобального контекста»), допустимо то число аргументов,
-    /// которое принимает ЛЮБАЯ из двух сигнатур.
+    /// Issue #32: переадресация вызова глобальному контексту описана в справке
+    /// ровно для одной пары — `СправочникМенеджер.ПолучитьДанныеВыбора`
+    /// («если в модуле менеджера указано два параметра, будет вызван метод
+    /// ПолучитьДанныеВыбора глобального контекста»). Только для неё допустимо то
+    /// число аргументов, которое принимает ЛЮБАЯ из двух сигнатур.
     #[test]
     fn manager_context_and_global_signatures_are_united() {
         use platform_index::{Method, Parameter, Signature, Type};
@@ -870,6 +870,83 @@ EndFunction
                 .iter()
                 .any(|e| e.kind == ExprErrorKind::WrongArgumentCount),
             "три аргумента не принимает ни одна сигнатура — находка обязана быть: {:?}",
+            result3.errors
+        );
+    }
+
+    /// Issue #32, продолжение #19: объединение сигнатур НЕ общее.
+    ///
+    /// В модуле обычной формы объекта `ПолучитьФорму` — метод `ДокументОбъект`
+    /// с тремя параметрами, и шесть аргументов платформа не компилирует:
+    /// «Слишком много фактических параметров» (проверено автором issue на
+    /// 8.3.17.1549, случай совпадает с исходным #19). Правка 0.21.7 объединяла
+    /// сигнатуры по любому совпавшему имени и гасила эту находку.
+    #[test]
+    fn object_context_is_not_united_with_global_signature() {
+        use platform_index::{Method, Parameter, Signature, Type};
+
+        fn method_with_args(name: &str, params: usize) -> Method {
+            Method {
+                name_ru: name.into(),
+                name_en: String::new(),
+                description: String::new(),
+                return_type: String::new(),
+                signatures: vec![Signature {
+                    name: String::new(),
+                    description: String::new(),
+                    parameters: (0..params)
+                        .map(|i| Parameter {
+                            name: format!("П{}", i + 1),
+                            type_name: String::new(),
+                            required: false,
+                            description: String::new(),
+                        })
+                        .collect(),
+                }],
+            }
+        }
+
+        let mut index = PlatformIndex::new();
+        // Шаблонный тип объекта-владельца: `ПолучитьФорму` с ТРЕМЯ параметрами.
+        index.insert_type(Type {
+            name_ru: "ДокументОбъект.<Имя документа>".into(),
+            name_en: String::new(),
+            description: String::new(),
+            methods: vec![method_with_args("ПолучитьФорму", 3)],
+            properties: Vec::new(),
+            constructors: Vec::new(),
+            enum_values: Vec::new(),
+        });
+        // Глобальная функция того же имени — с ШЕСТЬЮ параметрами.
+        index
+            .global_methods
+            .push(method_with_args("ПолучитьФорму", 6));
+
+        let form =
+            Some("Documents/ВозвратТоваровОтПокупателя/Forms/ФормаДокумента/Ext/Form/Module.bsl");
+
+        // Шесть аргументов: глобальная сигнатура их принимает, метод объекта — нет.
+        let six = "Процедура Тест()\n\tФ = ПолучитьФорму(\"Обработка.Х.Форма\", Неопределено, Неопределено, Ложь, Неопределено, Неопределено);\nКонецПроцедуры\n";
+        let result = validate_module_with_profile(&index, six, form, None, 3, Profile::Full);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::WrongArgumentCount),
+            "в обычной форме объекта шесть аргументов платформа не компилирует — \
+             находка обязана быть: {:?}",
+            result.errors
+        );
+
+        // Контроль: три аргумента — сигнатура метода объекта, находки быть не должно.
+        let three = "Процедура Тест()\n\tФ = ПолучитьФорму(\"Обработка.Х.Форма\", Неопределено, Неопределено);\nКонецПроцедуры\n";
+        let result3 = validate_module_with_profile(&index, three, form, None, 3, Profile::Full);
+        assert!(
+            !result3
+                .errors
+                .iter()
+                .any(|e| e.kind == ExprErrorKind::WrongArgumentCount),
+            "три аргумента — сигнатура метода объекта: {:?}",
             result3.errors
         );
     }

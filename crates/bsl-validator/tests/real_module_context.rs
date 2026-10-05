@@ -81,6 +81,39 @@ fn issue19_manager_module_call_uses_manager_signature() {
     }
 }
 
+/// Issue #32, часть 2: переадресация `ПолучитьДанныеВыбора` глобальному
+/// контексту документирована в справке менеджера — при двух параметрах в модуле
+/// менеджера вызывается глобальная функция (у неё два параметра). Три аргумента
+/// не принимает ни одна из сигнатур, и находка обязана остаться.
+#[test]
+fn issue32_manager_redirect_keeps_both_signatures() {
+    let Some(path) = hbk_path() else { return };
+    let index = load_from_hbk(&path).expect("PlatformIndex");
+
+    let two = "\
+Процедура Т(Параметры)
+	Д = ПолучитьДанныеВыбора(Параметры, Неопределено);
+КонецПроцедуры
+";
+    let found = argument_findings(&index, two, MANAGER_MODULE, 3);
+    assert!(
+        found.is_empty(),
+        "переадресованный вызов с двумя параметрами законен: {found:#?}"
+    );
+
+    let three = "\
+Процедура Т(Параметры)
+	Д = ПолучитьДанныеВыбора(Параметры, Неопределено, Ложь);
+КонецПроцедуры
+";
+    let found = argument_findings(&index, three, MANAGER_MODULE, 3);
+    assert_eq!(
+        found.len(),
+        1,
+        "три аргумента не принимает ни одна сигнатура: {found:#?}"
+    );
+}
+
 /// Модуль обычной формы: `ПолучитьФорму` — метод объекта-владельца (3 параметра).
 #[test]
 fn issue19_ordinary_form_call_uses_object_signature() {
